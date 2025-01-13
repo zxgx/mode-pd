@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -l select=2:ngpus=2
 #PBS -l place=vscatter
-#PBS -l walltime=2:00:00
+#PBS -l walltime=4:00:00
 #PBS -j oe
 #PBS -o debug.log
 
@@ -47,10 +47,6 @@ echo "detected hosts: $(cat $HOSTFILE)"
 
 # =============== launch cmds ================
 image=${SCRATCH}/images/cuda_12.4.1-cudnn-devel-u22.04.sif
-
-# /bin/bash -c "source $SCRATCH/venvs/modepd/bin/activate && \
-#     echo local host: \$(hostname) of rank: \${OMPI_COMM_WORLD_RANK}/\${OMPI_COMM_WORLD_SIZE} node rank: \${OMPI_COMM_WORLD_NODE_RANK} of size: \${OMPI_COMM_WORLD_LOCAL_SIZE}
-# "
 
 mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     singularity exec --bind $SCRATCH:$SCRATCH --nv $image \

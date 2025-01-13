@@ -12,7 +12,6 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator, FullyShardedDataParallelPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 
 import datasets
 from datasets import (
@@ -38,8 +37,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None,)
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
-    parser.add_argument("--preprocessing_num_workers", type=int, default=4,)
-    parser.add_argument("--block_size", type=int, default=32*1024,)
+    parser.add_argument("--block_size", type=int, default=16*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
 
     parser.add_argument("--weight_decay", type=float, default=0.01,)
@@ -75,9 +73,11 @@ def main():
     fsdp_plugin = FullyShardedDataParallelPlugin(
         sharding_strategy="FULL_SHARD",
         activation_checkpointing=True,
+        auto_wrap_policy="transformer_based_wrap",
+        mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
+        # cpu_offload=True,
     )
     accelerator = Accelerator(
-        mixed_precision='bf16', 
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         fsdp_plugin=fsdp_plugin,
         **accelerator_log_kwargs
@@ -112,7 +112,8 @@ def main():
     # model_name = "deepseek-ai/DeepSeek-V2-Lite"
     model_name = 'Qwen/Qwen2.5-3B-Instruct'
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16).cuda()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False).cuda()
     model.generation_config = GenerationConfig.from_pretrained(model_name)
     model.generation_config.pad_token_id = model.generation_config.eos_token_id
     print(f"model emb size: {model.get_input_embeddings().weight.shape[0]}"
@@ -146,9 +147,7 @@ def main():
         tokenized_datasets = raw_datasets.map(
             tokenize_function,
             batched=True,
-            # num_proc=args.preprocessing_num_workers,
             remove_columns=column_names,
-            # desc="Running tokenizer on dataset",
         )
 
     # 2. Padding to max length    
@@ -182,8 +181,6 @@ def main():
         lm_datasets = tokenized_datasets.map(
             group_texts,
             batched=True,
-            # num_proc=args.preprocessing_num_workers,
-            # desc=f"Grouping texts in chunks of {block_size}",
         )
     
     train_dataset = lm_datasets["train"]
@@ -241,7 +238,7 @@ def main():
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
-    logger.info(f"Model dtype: {model.dtype}")
+    logger.info(f"Model dtype: {model.dtype}, device: {model.device}")
     for idx, batch in enumerate(train_dataloader):
         print(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}")
         if idx == 2:
