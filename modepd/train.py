@@ -33,17 +33,18 @@ logger = get_logger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--report_to", type=str, default="tensorboard",)
+    parser.add_argument("--report_to", type=str, default="wandb",)
     parser.add_argument("--output_dir", type=str, default=None,)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42,)
+    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
-    parser.add_argument("--block_size", type=int, default=16*1024,)
+    parser.add_argument("--block_size", type=int, default=8*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
 
-    parser.add_argument("--weight_decay", type=float, default=0.01,)
-    parser.add_argument("--learning_rate", type=float, default=5e-5,)
+    parser.add_argument("--weight_decay", type=float, default=0.1,)
+    parser.add_argument("--learning_rate", type=float, default=2.4e-4,)
     parser.add_argument("--lr_scheduler_type", type=str, default="linear",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
@@ -106,8 +107,7 @@ def main():
 
     #################
     # Prepare model & tokenizer
-    # model_name = "deepseek-ai/DeepSeek-V2-Lite"
-    model_name = 'Qwen/Qwen2.5-3B-Instruct'
+    model_name = args.model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False)
@@ -230,7 +230,9 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(
+        optimizer_grouped_parameters, 
+        lr=args.learning_rate, betas=[0.9, 0.95], weight_decay=args.weight_decay)
     
     # Scheduler and math around the number of training steps.
     num_update_steps_per_epoch = args.max_train_steps * accelerator.num_processes
@@ -248,6 +250,7 @@ def main():
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
+        f"{model}\n"
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
         f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
         , main_process_only=False)
