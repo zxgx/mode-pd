@@ -54,6 +54,7 @@ image=${SCRATCH}/images/cuda_12.4.1-cudnn-devel-u22.04.sif
 mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     singularity exec --bind $SCRATCH:$SCRATCH --nv $image \
     /bin/bash -c "source $SCRATCH/venvs/modepd/bin/activate && \
+    export PYTHONPATH=$PBS_O_WORKDIR:\$PYTHONPATH && \
     torchrun \
     --nproc_per_node=$GPUS_PER_NODE \
     --nnodes=$NNODES \
