@@ -19,6 +19,9 @@
 # Hopper cluster has a cap on this env var up to 64
 # export OMP_NUM_THREADS=1
 
+module load openmpi/4.1.2-hpe
+module load singularity
+
 cd $PBS_O_WORKDIR
 echo "JOB ID: $PBS_JOBID, pwd: $PWD, pbs workdir: $PBS_O_WORKDIR"
 
