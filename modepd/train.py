@@ -20,11 +20,13 @@ from datasets import (
 )
 import transformers
 from transformers import (
-    AutoTokenizer, AutoModelForCausalLM, GenerationConfig, 
+    AutoTokenizer, AutoModelForCausalLM, GenerationConfig,
     # DataCollatorForLanguageModeling,
     default_data_collator,
     get_scheduler,
 )
+
+from modepd.utils import get_memory_stats
 
 logger = get_logger(__name__)
 
@@ -34,7 +36,7 @@ def parse_args():
     parser.add_argument("--report_to", type=str, default="tensorboard",)
     parser.add_argument("--output_dir", type=str, default=None,)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=None,)
+    parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
     parser.add_argument("--block_size", type=int, default=16*1024,)
@@ -50,11 +52,6 @@ def parse_args():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
 
-    # print(f"from os environ: rank: {os.environ.get('RANK', None)}/{os.environ.get('WORLD_SIZE', None)}"
-    #       f", local rank: {os.environ.get('LOCAL_RANK', None)}/{os.environ.get('LOCAL_WORLD_SIZE', None)}"
-    #       f", node rank: {os.environ.get('NODE_RANK', None)}"
-    #       f", master addr: {os.environ.get('MASTER_ADDR', None)}, port: {os.environ.get('MASTER_PORT', None)}"
-    # )
     return parser.parse_args()
 
 
@@ -113,11 +110,21 @@ def main():
     model_name = 'Qwen/Qwen2.5-3B-Instruct'
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False).cuda()
-    model.generation_config = GenerationConfig.from_pretrained(model_name)
-    model.generation_config.pad_token_id = model.generation_config.eos_token_id
-    print(f"model emb size: {model.get_input_embeddings().weight.shape[0]}"
-          f", tokenizer vocab size: {len(tokenizer)}")
+        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False)
+    
+    if "DeepSeek-V2" in model_name:
+        model.generation_config = GenerationConfig.from_pretrained(model_name)
+        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
+    alloc, max_alloc, reserved, max_reserved = get_memory_stats()
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
+        f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
+        main_process_only=False)
+    logger.info(
+        f", model emb size: {model.get_input_embeddings().weight.shape[0]}"
+        f", tokenizer vocab size: {len(tokenizer)}")
     
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -206,7 +213,7 @@ def main():
     )
 
     for batch in train_dataloader:
-        print(batch['input_ids'].shape)
+        logger.info(f"{batch['input_ids'].shape}", main_process_only=False)
         break
 
     #################
@@ -238,9 +245,14 @@ def main():
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
-    logger.info(f"Model dtype: {model.dtype}, device: {model.device}")
+    alloc, max_alloc, reserved, max_reserved = get_memory_stats()
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
+        f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
+        , main_process_only=False)
     for idx, batch in enumerate(train_dataloader):
-        print(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}")
+        logger.info(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}", main_process_only=False)
         if idx == 2:
             break
     
@@ -251,8 +263,6 @@ def main():
     # The trackers initializes automatically on the main process.
     if args.with_tracking:
         experiment_config = vars(args)
-        # TensorBoard cannot log Enums, need the raw value
-        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         accelerator.init_trackers("clm_no_trainer", experiment_config)
 
     #################
@@ -341,15 +351,17 @@ def main():
         
         if completed_steps >= args.max_train_steps:
             break
-    
-    if args.with_tracking:
-        accelerator.end_training()
+    alloc, max_allc, resv, max_resv = get_memory_stats()
+    logger.info(
+        f"Memory stats on exiting: Alloc: {alloc:.2f} G / {max_allc:.2f} G, Resrv: {resv:.2f} G / {max_resv:.2f} G"
+        , main_process_only=False)
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            args.output_dir, is_main_process=accelerator.is_main_process, 
+            save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
@@ -363,6 +375,10 @@ def main():
                 )
             # with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             #     json.dump({"perplexity": perplexity}, f)
+    
+    if args.with_tracking:        
+        accelerator.end_training()
+
 
 
 if __name__ == "__main__":

@@ -60,4 +60,5 @@ mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     modepd/train.py > eval.log 2>&1
 "
 
+# torchrun --standalone --nproc_per_node 2 modepd/train.py --with_tracking --output_dir logs/demo
 rm $HOSTFILE
