@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -l select=2:ngpus=2
+#PBS -l select=2:ngpus=4
 #PBS -l place=vscatter
 #PBS -l walltime=4:00:00
 #PBS -j oe
@@ -28,7 +28,7 @@ echo "JOB ID: $PBS_JOBID, pwd: $PWD, pbs workdir: $PBS_O_WORKDIR"
 # for torch.distributed
 export NNODES=2
 # export NODE_RANK=0
-export GPUS_PER_NODE=2
+export GPUS_PER_NODE=4
 export WORLD_SIZE=$(($NNODES*$GPUS_PER_NODE))
 export MASTER_ADDR=$(head -n 1 $PBS_NODEFILE | awk -F'.' '{print $1}')
 export MASTER_PORT=29501
@@ -61,7 +61,11 @@ mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     --node_rank=\${OMPI_COMM_WORLD_RANK} \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    modepd/train.py > eval.log 2>&1
+    modepd/train.py \
+    --output_dir deepseek_v2_10B_finetune\
+    --model_name_or_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --with_tracking \
+    --max_train_steps 1638 > eval.log 2>&1
 "
 
 # torchrun --standalone --nproc_per_node 2 modepd/train.py --with_tracking --output_dir logs/demo
