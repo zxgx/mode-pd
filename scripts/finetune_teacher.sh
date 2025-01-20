@@ -1,4 +1,5 @@
 #!/bin/bash
+#PBS -P CFP01-CF-076
 #PBS -l select=2:ngpus=2
 #PBS -l place=vscatter
 #PBS -l walltime=4:00:00
@@ -57,8 +58,10 @@ mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     --node_rank=\${OMPI_COMM_WORLD_RANK} \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    modepd/train.py > eval.log 2>&1
+    modepd/train.py --model_name_or_path deepseek-ai/DeepSeek-V2-Lite-Chat \
+    --with_tracking --output_dir logs/teacher > eval.log 2>&1
 "
 
+# for debug purpose
 # torchrun --standalone --nproc_per_node 2 modepd/train.py --with_tracking --output_dir logs/demo
 rm $HOSTFILE
