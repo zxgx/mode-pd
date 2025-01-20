@@ -156,3 +156,7 @@ coverage.xml
 # ignore testmon and coverage files
 .coverage
 .testmondata*
+
+logs
+logs/
+wandb/
