@@ -68,5 +68,6 @@ mpirun --hostfile $HOSTFILE --np $NNODES -N 1 \
     --max_train_steps 819 > eval.log 2>&1
 "
 
+# for debug purpose
 # torchrun --standalone --nproc_per_node 2 modepd/train.py --with_tracking --output_dir logs/demo
 rm $HOSTFILE

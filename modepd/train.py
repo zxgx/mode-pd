@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
-    parser.add_argument("--block_size", type=int, default=8*1024,)
+    parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
@@ -83,11 +83,13 @@ def main():
     
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    logger.info(accelerator.state, main_process_only=False)
+    logger.info(f"{accelerator.state}\n rank: {accelerator.process_index}/{accelerator.num_processes}: "
+                f"is_main_process: {accelerator.is_main_process}, is_local_main_process: {accelerator.is_local_main_process}", 
+                main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
         transformers.utils.logging.set_verbosity_info()
@@ -347,7 +349,7 @@ def main():
                 {
                 # "perplexity": perplexity
                 "train_loss": total_loss.item() / completed_steps,
-                "step": completed_steps,
+                # "step": completed_steps,
                 },
                 step=completed_steps,
             )
@@ -360,7 +362,6 @@ def main():
         , main_process_only=False)
 
     if args.output_dir is not None:
-        accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(
             args.output_dir, is_main_process=accelerator.is_main_process, 
@@ -378,10 +379,11 @@ def main():
                 )
             # with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             #     json.dump({"perplexity": perplexity}, f)
+        logger.info(f"Saving model to {args.output_dir} done!", main_process_only=False)
+        accelerator.wait_for_everyone()
     
     if args.with_tracking:        
         accelerator.end_training()
-
 
 
 if __name__ == "__main__":
