@@ -63,7 +63,7 @@ NUM_WARMUP_STEPS_VALUES=(0 100 200)
 # =============== grid search ================
 for TRAINING_TOKEN_B in "${TRAINING_TOKEN_B_VALUES[@]}"; do
     # calculate steps
-    MAX_TRAIN_STEPS= $(echo "scale=0; ($TRAINING_TOKEN_B * 2 ** 30) / $BLOCK_SIZE / $NNODES / $GPUS_PER_NODE" | bc)
+    MAX_TRAIN_STEPS=$(echo "scale=0; ($TRAINING_TOKEN_B * 2 ^ 30) / $BLOCK_SIZE / $NNODES / $GPUS_PER_NODE" | bc)
 
     for WEIGHT_DECAY in "${WEIGHT_DECAY_VALUES[@]}"; do
         for LEARNING_RATE in "${LEARNING_RATE_VALUES[@]}"; do
@@ -82,7 +82,7 @@ for TRAINING_TOKEN_B in "${TRAINING_TOKEN_B_VALUES[@]}"; do
                         --master_addr=$MASTER_ADDR \
                         --master_port=$MASTER_PORT \
                         modepd/train.py \
-                        --output_dir logs/teacher_${TRAINING_TOKEN_B}_${WEIGHT_DECAY}_${LEARNING_RATE}_${LR_SCHEDULER_TYPE}_${NUM_WARMUP_STEPS} \
+                        --output_dir ${SCRATCH}/logs/teacher_${TRAINING_TOKEN_B}_${WEIGHT_DECAY}_${LEARNING_RATE}_${LR_SCHEDULER_TYPE}_${NUM_WARMUP_STEPS} \
                         --model_name_or_path deepseek-ai/DeepSeek-V2-Lite-Chat \
                         --with_tracking \
                         --weight_decay=$WEIGHT_DECAY \
