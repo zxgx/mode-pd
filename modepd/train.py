@@ -73,7 +73,7 @@ def main():
         activation_checkpointing=True,
         auto_wrap_policy="transformer_based_wrap",
         mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
-        # cpu_offload=True,
+        cpu_offload=True,
     )
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -333,6 +333,9 @@ def main():
             lr_scheduler.step()
             optimizer.zero_grad()
 
+        # Clear unused memory after each step
+        torch.cuda.empty_cache()
+
         if accelerator.sync_gradients:
             progress_bar.update(1)
             completed_steps += 1
@@ -360,6 +363,8 @@ def main():
     logger.info(
         f"Memory stats on exiting: Alloc: {alloc:.2f} G / {max_allc:.2f} G, Resrv: {resv:.2f} G / {max_resv:.2f} G"
         , main_process_only=False)
+
+    torch.cuda.empty_cache()
 
     if args.output_dir is not None:
         unwrapped_model = accelerator.unwrap_model(model)
