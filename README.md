@@ -17,10 +17,15 @@
     
     # create environment
     python3 -m venv $SCRATCH/venvs/modepd
+
+    # activate environment
     source $SCRATCH/venvs/modepd/bin/activate
 
     # install packages
-    pip install torch accelerate tqdm datasets transformers huggingface_hub
+    pip install torch accelerate tqdm datasets transformers huggingface_hub wandb
+
+    # setup wandb (paste in API key)
+    wandb login
 
     # download model
     python modepd/download.py
