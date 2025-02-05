@@ -5,7 +5,8 @@ import torch
 from modepd.model.modeling_deepseek import DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
 
 
-def layer_prune(args, model, tokenizer, train_dataloader):
+def layer_prune(args, model, train_dataloader):
+    model.cuda()
     device = torch.cuda.current_device()
     num_layers = model.config.num_hidden_layers
     similarities = torch.zeros(num_layers, num_layers, device=device)
@@ -17,19 +18,24 @@ def layer_prune(args, model, tokenizer, train_dataloader):
         layer = model.model.layers[i]
         
         # bind layer index i into this hook to record input/outputs
-        def stateful_hook(module, _input, _output):
-            cache[i] = _input.squeeze(0)
-            if i == num_layers-1:
-                cache[-1] = _output.squeeze(0)
+        # Use a helper function to create a new scope for each hook
+        def create_hook(layer_idx):
+            def stateful_hook(module, _input, _output):
+                cache[layer_idx] = _input[0].squeeze(0)
+                if layer_idx == num_layers-1:
+                    cache[-1] = _output[0].squeeze(0)
 
-                # accumulate results 
-                for j in range(num_layers):
-                    for k in range(j+1, num_layers+1):
-                        sim = torch.nn.functional.cosine_similarity(cache[j].float(), cache[k].float(), dim=0)
-                        denominator[j, k-j-1] += sim.shape[0]
-                        similarities[j, k-j-1] += sim.sum()
-                    
-        handle = layer.register_forward_hook(stateful_hook)
+                    # accumulate results 
+                    for j in range(num_layers):
+                        for k in range(j+1, num_layers+1):
+                            sim = torch.nn.functional.cosine_similarity(cache[j], cache[k], dim=-1).float()
+                            denominator[j, k-j-1] += sim.shape[0]
+                            similarities[j, k-j-1] += sim.sum()
+                        cache[j] = None
+            return stateful_hook
+        
+        # Create a unique hook for each layer with its correct index
+        handle = layer.register_forward_hook(create_hook(i))
         handles.append(handle)
     
     # execute model to collect similarities
@@ -37,13 +43,15 @@ def layer_prune(args, model, tokenizer, train_dataloader):
         if step == args.max_steps:
             break
         with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
             model(**batch)
-    
+
     similarities /= denominator
 
     # clear handles before saving
     for handle in handles:
         handle.remove()
+    del cache
 
     # prune the model
     similarities_drop_1 = similarities[:, 0].view(-1)
@@ -55,6 +63,8 @@ def layer_prune(args, model, tokenizer, train_dataloader):
     for new_id, reserved_old_id in enumerate(reserved_layer_list):
         layer_id_mapping[reserved_old_id] = new_id
 
+    # save the pruned model state, this should not introduce more GPU memory usage
+    model.cpu()
     state_dict = model.state_dict()
     save_state_dict = {}
     for state_name in sorted(list(state_dict.keys())):
@@ -66,7 +76,7 @@ def layer_prune(args, model, tokenizer, train_dataloader):
                 save_state_dict[state_name] = state_dict[state_name]
                 break
 
-    # Config
+    # update config
     new_config = deepcopy(model.config)
     new_config.num_hidden_layers = len(layer_id_mapping)
 
@@ -79,11 +89,11 @@ def layer_prune(args, model, tokenizer, train_dataloader):
             new_config.n_routed_experts = [model.config.n_routed_experts[i] for i in preserved_layers]
         new_model = DeepseekV2ForCausalLM(config=new_config)
     else:
-        raise NotImplementedError
+        raise NotImplementedError("Only DeepseekV2ForCausalLM is supported")
 
     # Model
     new_model.load_state_dict(save_state_dict, strict=True)  # update the layer parameters
     if not hasattr(new_model, "quantization_config"):
         new_model.bfloat16()
 
-    return new_model, new_config
+    return new_model

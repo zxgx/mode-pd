@@ -106,7 +106,8 @@ def main():
     model_name = args.model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False)
+        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False,
+        attn_implementation="flash_attention_2")
     
     if "DeepSeek-V2" in model_name:
         model.generation_config = GenerationConfig.from_pretrained(model_name)
