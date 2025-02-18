@@ -73,6 +73,7 @@ def main():
         activation_checkpointing=True,
         auto_wrap_policy="transformer_based_wrap",
         mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
+        use_orig_params=args.finetune_mod_only
         # cpu_offload=True,
     )
     accelerator = Accelerator(
@@ -134,7 +135,7 @@ def main():
         f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
         main_process_only=False)
     logger.info(
-        f", model emb size: {model.get_input_embeddings().weight.shape[0]}"
+        f"Model emb size: {model.get_input_embeddings().weight.shape[0]}"
         f", tokenizer vocab size: {len(tokenizer)}")
     
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch

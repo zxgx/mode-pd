@@ -410,7 +410,7 @@ class ModRouter(nn.Module):
         if self.training:
             # topk, seq_len
             topk_weights, topk_indices = torch.topk(token_weights, self.mod_topk)
-            calib_labels = torch.zeros_like(token_weights, dtype=torch.long)
+            calib_labels = torch.zeros_like(token_weights)
             calib_labels.scatter_(1, topk_indices, 1)
             aux_loss = F.binary_cross_entropy_with_logits(token_weights, calib_labels)
             # adopt the trick for appending the calibration loss for sampling
@@ -1300,11 +1300,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         org_hidden_states, topk_indices = None, None
         if self.mod_router is not None:
             org_hidden_states = hidden_states
+
             topk_weights, topk_indices = self.mod_router(hidden_states)
+            position_ids = topk_indices
+            topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
+
             # bsz, topk, hidden_size
             hidden_states = torch.take_along_dim(hidden_states, topk_indices, dim=1)
-
-            position_ids = topk_indices
             kwargs['override_max_kv_seq_len'] = org_hidden_states.size(1)
 
         residual = hidden_states
@@ -1332,7 +1334,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         if self.mod_router is not None:
             # NOTE: This is different from the org paper
             hidden_states = topk_weights * hidden_states
-            topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
             hidden_states = torch.scatter(org_hidden_states, 1, topk_indices, hidden_states)
             org_hidden_states = None
 
