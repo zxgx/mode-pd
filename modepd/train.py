@@ -15,12 +15,14 @@ from accelerate.utils import set_seed
 import datasets
 import transformers
 from transformers import (
-    AutoTokenizer, AutoModelForCausalLM, GenerationConfig,
+    GenerationConfig,
     DataCollatorForLanguageModeling,
     get_scheduler,
 )
 
 from modepd.utils import get_memory_stats, build_dataset
+from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
+from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
 
 logger = get_logger(__name__)
 
@@ -46,6 +48,10 @@ def parse_args():
     parser.add_argument("--with_tracking", action="store_true",)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
+
+    parser.add_argument("--enable_mod", action="store_true",)
+    parser.add_argument("--mod_topk", type=int, default=2*1024,)
+    parser.add_argument("--finetune_mod_only", action="store_true",)
 
     return parser.parse_args()
 
@@ -104,11 +110,19 @@ def main():
     #################
     # Prepare model & tokenizer
     model_name = args.model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False,
-        attn_implementation="flash_attention_2")
+    tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
+    model = DeepseekV2ForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
+        enable_mod=args.enable_mod, mod_topk=args.mod_topk,
+    )
     
+    if args.finetune_mod_only:
+        for name, param in model.named_parameters():
+            if "mod_router" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
     if "DeepSeek-V2" in model_name:
         model.generation_config = GenerationConfig.from_pretrained(model_name)
         model.generation_config.pad_token_id = model.generation_config.eos_token_id

@@ -390,6 +390,41 @@ class DeepseekV2MLP(nn.Module):
         return down_proj
 
 
+class ModRouter(nn.Module):
+    def __init__(self, config, hidden_size=None):
+        super().__init__()
+        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
+        self.mod_topk = config.mod_topk
+        self.token_router = nn.Linear(self.hidden_size, 1, bias=False)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [bsz, seq_len, hidden_size]
+
+        Returns:
+            (torch.Tensor, torch.Tensor): [bsz, mod_topk], [bsz, mod_topk]
+        """
+        # bsz, seq_len
+        token_weights = self.token_router(x).squeeze(-1)
+        if self.training:
+            # topk, seq_len
+            topk_weights, topk_indices = torch.topk(token_weights, self.mod_topk)
+            calib_labels = torch.zeros_like(token_weights, dtype=torch.long)
+            calib_labels.scatter_(1, topk_indices, 1)
+            aux_loss = F.binary_cross_entropy_with_logits(token_weights, calib_labels)
+            # adopt the trick for appending the calibration loss for sampling
+            topk_weights = AddAuxiliaryLoss.apply(topk_weights, aux_loss)
+        else:
+            # how to do inference???
+            # bsz, seq_len (1?)
+            # topk_indices = token_weights > 0.5
+            # bsz,
+            # topk_weights = token_weights[topk_weights]
+            pass
+        return topk_weights, topk_indices
+
+
 class MoEGate(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -851,7 +886,11 @@ class DeepseekV2Attention(nn.Module):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        if "override_max_kv_seq_len" in kwargs:
+            pos_seq_len = kwargs.pop("override_max_kv_seq_len")
+        else:
+            pos_seq_len = kv_seq_len
+        cos, sin = self.rotary_emb(value_states, seq_len=pos_seq_len)
 
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
 
@@ -977,11 +1016,13 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         k_nope, value_states = torch.split(
             kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
-        kv_seq_len = value_states.shape[-2]
 
-        kv_seq_len = value_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        if "override_max_kv_seq_len" in kwargs:
+            kv_seq_len = kwargs.pop("override_max_kv_seq_len")
+        else:
+            kv_seq_len = value_states.shape[-2]
+            if past_key_value is not None:
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
@@ -1220,6 +1261,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        if hasattr(config, "enable_mod") and config.enable_mod:
+            self.mod_router = ModRouter(config)
+        else:
+            self.register_module("mod_router", None)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1250,6 +1296,17 @@ class DeepseekV2DecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+        
+        org_hidden_states, topk_indices = None, None
+        if self.mod_router is not None:
+            org_hidden_states = hidden_states
+            topk_weights, topk_indices = self.mod_router(hidden_states)
+            # bsz, topk, hidden_size
+            hidden_states = torch.take_along_dim(hidden_states, topk_indices, dim=1)
+
+            position_ids = topk_indices
+            kwargs['override_max_kv_seq_len'] = org_hidden_states.size(1)
+
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1271,6 +1328,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        if self.mod_router is not None:
+            # NOTE: This is different from the org paper
+            hidden_states = topk_weights * hidden_states
+            topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
+            hidden_states = torch.scatter(org_hidden_states, 1, topk_indices, hidden_states)
+            org_hidden_states = None
 
         outputs = (hidden_states,)
 

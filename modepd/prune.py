@@ -20,6 +20,7 @@ from modepd.pruning.weight_prune import weight_prune
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite-Chat",)
+    parser.add_argument("--enable_mod", action="store_true",)
     
     # build a dataset for pruning
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
@@ -45,7 +46,9 @@ def main():
     model_name = args.model_name_or_path
     tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
     model = DeepseekV2ForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2")
+        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2",
+        enable_mod=args.enable_mod,
+    )
     
     if "DeepSeek-V2" in model_name:
         model.generation_config = GenerationConfig.from_pretrained(model_name)
