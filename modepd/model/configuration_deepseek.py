@@ -154,8 +154,7 @@ class DeepseekV2Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
-        enable_mod=False,
-        mod_topk=2048,
+        enable_skip_router=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -198,8 +197,7 @@ class DeepseekV2Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.enable_mod = enable_mod
-        self.mod_topk = mod_topk
+        self.enable_skip_router = enable_skip_router
 
         super().__init__(
             pad_token_id=pad_token_id,

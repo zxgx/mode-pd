@@ -390,41 +390,6 @@ class DeepseekV2MLP(nn.Module):
         return down_proj
 
 
-class ModRouter(nn.Module):
-    def __init__(self, config, hidden_size=None):
-        super().__init__()
-        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
-        self.mod_topk = config.mod_topk
-        self.token_router = nn.Linear(self.hidden_size, 1, bias=False)
-
-    def forward(self, x):
-        """
-        Args:
-            x: [bsz, seq_len, hidden_size]
-
-        Returns:
-            (torch.Tensor, torch.Tensor): [bsz, mod_topk], [bsz, mod_topk]
-        """
-        # bsz, seq_len
-        token_weights = self.token_router(x).squeeze(-1)
-        if self.training:
-            # topk, seq_len
-            topk_weights, topk_indices = torch.topk(token_weights, self.mod_topk)
-            calib_labels = torch.zeros_like(token_weights)
-            calib_labels.scatter_(1, topk_indices, 1)
-            aux_loss = F.binary_cross_entropy_with_logits(token_weights, calib_labels)
-            # adopt the trick for appending the calibration loss for sampling
-            topk_weights = AddAuxiliaryLoss.apply(topk_weights, aux_loss)
-        else:
-            # how to do inference???
-            # bsz, seq_len (1?)
-            # topk_indices = token_weights > 0.5
-            # bsz,
-            # topk_weights = token_weights[topk_weights]
-            pass
-        return topk_weights, topk_indices
-
-
 class MoEGate(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -445,12 +410,21 @@ class MoEGate(nn.Module):
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.gating_dim))
         )
+        if config.enable_skip_router:
+            self.skip_router_weight = nn.Parameter(
+                torch.empty((1, self.gating_dim))
+            )
+        else:
+            self.register_parameter("skip_router_weight", None)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         import torch.nn.init as init
 
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.config.enable_skip_router:
+            init.kaiming_uniform_(self.skip_router_weight, a=math.sqrt(5))
 
     def forward(self, hidden_states):
         bsz, seq_len, h = hidden_states.shape
@@ -459,6 +433,13 @@ class MoEGate(nn.Module):
         logits = F.linear(
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
         )
+
+        if self.config.enable_skip_router:
+            skip_logits = F.linear(
+                hidden_states.type(torch.float32), self.skip_router_weight.type(torch.float32)
+            )
+            logits = torch.cat([logits, skip_logits], dim=1)
+
         if self.scoring_func == "softmax":
             scores = logits.softmax(dim=-1, dtype=torch.float32)
         else:
@@ -472,6 +453,8 @@ class MoEGate(nn.Module):
                 scores, k=self.top_k, dim=-1, sorted=False
             )
         elif self.topk_method == "group_limited_greedy":
+            assert not self.config.enable_skip_router
+
             group_scores = (
                 scores.view(bsz * seq_len, self.n_group, -1).max(dim=-1).values
             )  # [n, n_group]
@@ -502,30 +485,31 @@ class MoEGate(nn.Module):
             topk_weight = topk_weight * self.routed_scaling_factor
         ### expert-level computation auxiliary loss
         if self.training and self.alpha > 0.0:
+            # [bsz*seq_len, n_exp + skip]
             scores_for_aux = scores
             aux_topk = self.top_k
             # always compute aux loss based on the naive greedy topk method
+            # [bsz, seq_len * topk]
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            n_exp = self.n_routed_experts + (1 if self.config.enable_skip_router else 0)
             if self.seq_aux:
                 scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
-                ce = torch.zeros(
-                    bsz, self.n_routed_experts, device=hidden_states.device
-                )
+                ce = torch.zeros(bsz, n_exp, device=hidden_states.device)
                 ce.scatter_add_(
                     1,
                     topk_idx_for_aux_loss,
                     torch.ones(bsz, seq_len * aux_topk, device=hidden_states.device),
-                ).div_(seq_len * aux_topk / self.n_routed_experts)
+                ).div_(seq_len * aux_topk / n_exp)
                 aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(
                     dim=1
                 ).mean() * self.alpha
             else:
                 mask_ce = F.one_hot(
-                    topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts
+                    topk_idx_for_aux_loss.view(-1), num_classes=n_exp
                 )
                 ce = mask_ce.float().mean(0)
                 Pi = scores_for_aux.mean(0)
-                fi = ce * self.n_routed_experts
+                fi = ce * n_exp
                 aux_loss = (Pi * fi).sum() * self.alpha
         else:
             aux_loss = None
@@ -585,14 +569,16 @@ class DeepseekV2MoE(nn.Module):
             self.ep_size = 1
             self.experts_per_rank = config.n_routed_experts
             self.ep_rank = 0
-            self.experts = nn.ModuleList(
-                [
-                    DeepseekV2MLP(
-                        config, intermediate_size=config.moe_intermediate_size
-                    )
-                    for i in range(config.n_routed_experts)
-                ]
-            )
+            experts = [
+                DeepseekV2MLP(
+                    config, intermediate_size=config.moe_intermediate_size
+                )
+                for i in range(config.n_routed_experts)
+            ]
+            if self.config.enable_skip_router:
+                experts.append(nn.Identity())
+            self.experts = nn.ModuleList(experts)
+
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -886,11 +872,7 @@ class DeepseekV2Attention(nn.Module):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        if "override_max_kv_seq_len" in kwargs:
-            pos_seq_len = kwargs.pop("override_max_kv_seq_len")
-        else:
-            pos_seq_len = kv_seq_len
-        cos, sin = self.rotary_emb(value_states, seq_len=pos_seq_len)
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
 
@@ -1016,13 +998,11 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         k_nope, value_states = torch.split(
             kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
+        kv_seq_len = value_states.shape[-2]
 
-        if "override_max_kv_seq_len" in kwargs:
-            kv_seq_len = kwargs.pop("override_max_kv_seq_len")
-        else:
-            kv_seq_len = value_states.shape[-2]
-            if past_key_value is not None:
-                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        kv_seq_len = value_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
@@ -1261,11 +1241,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
-        if hasattr(config, "enable_mod") and config.enable_mod:
-            self.mod_router = ModRouter(config)
-        else:
-            self.register_module("mod_router", None)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1296,19 +1271,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
-        
-        org_hidden_states, topk_indices = None, None
-        if self.mod_router is not None:
-            org_hidden_states = hidden_states
-
-            topk_weights, topk_indices = self.mod_router(hidden_states)
-            position_ids = topk_indices
-            topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
-
-            # bsz, topk, hidden_size
-            hidden_states = torch.take_along_dim(hidden_states, topk_indices, dim=1)
-            kwargs['override_max_kv_seq_len'] = org_hidden_states.size(1)
-
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1330,12 +1292,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
-        if self.mod_router is not None:
-            # NOTE: This is different from the org paper
-            hidden_states = topk_weights * hidden_states
-            hidden_states = torch.scatter(org_hidden_states, 1, topk_indices, hidden_states)
-            org_hidden_states = None
 
         outputs = (hidden_states,)
 
@@ -1790,7 +1746,7 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_length()
+                max_cache_length = past_key_values.get_max_cache_shape()
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None

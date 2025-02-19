@@ -9,7 +9,7 @@ from transformers import (
     DataCollatorForLanguageModeling
 )
 
-from modepd.utils import build_dataset
+from modepd.utils import build_dataset, init_router
 from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
 from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
 from modepd.pruning.layer_prune import layer_prune
@@ -20,7 +20,7 @@ from modepd.pruning.weight_prune import weight_prune
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite-Chat",)
-    parser.add_argument("--enable_mod", action="store_true",)
+    parser.add_argument("--enable_skip_router", action="store_true",)
     
     # build a dataset for pruning
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
@@ -47,8 +47,9 @@ def main():
     tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
     model = DeepseekV2ForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2",
-        enable_mod=args.enable_mod,
+        enable_skip_router=args.enable_skip_router,
     )
+    init_router(model)
     
     if "DeepSeek-V2" in model_name:
         model.generation_config = GenerationConfig.from_pretrained(model_name)

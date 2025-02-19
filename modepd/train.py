@@ -15,12 +15,11 @@ from accelerate.utils import set_seed
 import datasets
 import transformers
 from transformers import (
-    GenerationConfig,
     DataCollatorForLanguageModeling,
     get_scheduler,
 )
 
-from modepd.utils import get_memory_stats, build_dataset
+from modepd.utils import get_memory_stats, build_dataset, init_router
 from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
 from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
 
@@ -49,9 +48,8 @@ def parse_args():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
 
-    parser.add_argument("--enable_mod", action="store_true",)
-    parser.add_argument("--mod_topk", type=int, default=2*1024,)
-    parser.add_argument("--finetune_mod_only", action="store_true",)
+    parser.add_argument("--enable_skip_router", action="store_true",)
+    parser.add_argument("--finetune_skip_router_only", action="store_true",)
 
     return parser.parse_args()
 
@@ -73,7 +71,7 @@ def main():
         activation_checkpointing=True,
         auto_wrap_policy="transformer_based_wrap",
         mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=args.finetune_mod_only
+        use_orig_params=args.finetune_skip_router_only
         # cpu_offload=True,
     )
     accelerator = Accelerator(
@@ -114,19 +112,16 @@ def main():
     tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
     model = DeepseekV2ForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
-        enable_mod=args.enable_mod, mod_topk=args.mod_topk,
+        enable_skip_router=args.enable_skip_router
     )
-    
-    if args.finetune_mod_only:
+    init_router(model)
+
+    if args.enable_skip_router and args.finetune_skip_router_only:
         for name, param in model.named_parameters():
-            if "mod_router" in name:
+            if "skip_router_weight" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-
-    if "DeepSeek-V2" in model_name:
-        model.generation_config = GenerationConfig.from_pretrained(model_name)
-        model.generation_config.pad_token_id = model.generation_config.eos_token_id
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
