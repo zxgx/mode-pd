@@ -61,14 +61,6 @@ def main():
 
     import pdb
     pdb.set_trace()
-    
-    model.cuda()
-    text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
-    inputs = tokenizer(text, return_tensors="pt")
-    outputs = model.generate(**inputs.to(model.device), max_new_tokens=100)
-    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(result)
-    exit(0)
 
     train_dataset = build_dataset(args, tokenizer)
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -99,5 +91,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # model.cuda()
+    # text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
+    # inputs = tokenizer(text, return_tensors="pt")
+    # outputs = model.generate(**inputs.to(model.device), max_new_tokens=100)
+    # result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # print(result)
+    # exit(0)
     main()
     
