@@ -48,8 +48,9 @@ def parse_args():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
 
-    parser.add_argument("--enable_skip_router", action="store_true",)
-    parser.add_argument("--finetune_skip_router_only", action="store_true",)
+    parser.add_argument("--mod_type", type=str, default=None, choices=['staged', 'integrated'])
+    parser.add_argument("--staged_mod_topk", type=int, default=2048)
+    parser.add_argument("--finetune_mod_only", action="store_true",)
 
     return parser.parse_args()
 
@@ -71,7 +72,7 @@ def main():
         activation_checkpointing=True,
         auto_wrap_policy="transformer_based_wrap",
         mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=args.finetune_skip_router_only
+        use_orig_params=args.finetune_mod_only
         # cpu_offload=True,
     )
     accelerator = Accelerator(
@@ -112,13 +113,17 @@ def main():
     tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
     model = DeepseekV2ForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
-        enable_skip_router=args.enable_skip_router
+        mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
     )
     init_router(model)
 
-    if args.enable_skip_router and args.finetune_skip_router_only:
+    if args.mod_type is not None and args.finetune_mod_only:
+        if args.mod_type == 'staged':
+            trainable_param_prefix = "mod_router"
+        elif args.mod_type == 'integrated':
+            trainable_param_prefix = "skip_router_weight"
         for name, param in model.named_parameters():
-            if "skip_router_weight" in name:
+            if trainable_param_prefix in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False

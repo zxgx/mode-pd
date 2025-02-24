@@ -20,8 +20,10 @@ from modepd.pruning.weight_prune import weight_prune
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite-Chat",)
-    parser.add_argument("--enable_skip_router", action="store_true",)
-    
+
+    parser.add_argument("--mod_type", type=str, default=None, choices=['staged', 'integrated'])
+    parser.add_argument("--staged_mod_topk", type=int, default=2048)
+
     # build a dataset for pruning
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
@@ -47,7 +49,7 @@ def main():
     tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
     model = DeepseekV2ForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2",
-        enable_skip_router=args.enable_skip_router,
+        mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
     )
     init_router(model)
     
@@ -59,6 +61,14 @@ def main():
 
     import pdb
     pdb.set_trace()
+    
+    model.cuda()
+    text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
+    inputs = tokenizer(text, return_tensors="pt")
+    outputs = model.generate(**inputs.to(model.device), max_new_tokens=100)
+    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print(result)
+    exit(0)
 
     train_dataset = build_dataset(args, tokenizer)
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)

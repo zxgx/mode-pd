@@ -410,7 +410,7 @@ class MoEGate(nn.Module):
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.gating_dim))
         )
-        if config.enable_skip_router:
+        if config.mod_type == 'integrated':
             self.skip_router_weight = nn.Parameter(
                 torch.empty((1, self.gating_dim))
             )
@@ -423,7 +423,7 @@ class MoEGate(nn.Module):
         import torch.nn.init as init
 
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.config.enable_skip_router:
+        if self.config.mod_type:
             init.kaiming_uniform_(self.skip_router_weight, a=math.sqrt(5))
 
     def forward(self, hidden_states):
@@ -434,7 +434,7 @@ class MoEGate(nn.Module):
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
         )
 
-        if self.config.enable_skip_router:
+        if self.config.mod_type == 'integrated':
             skip_logits = F.linear(
                 hidden_states.type(torch.float32), self.skip_router_weight.type(torch.float32)
             )
@@ -453,7 +453,7 @@ class MoEGate(nn.Module):
                 scores, k=self.top_k, dim=-1, sorted=False
             )
         elif self.topk_method == "group_limited_greedy":
-            assert not self.config.enable_skip_router
+            assert self.config.mod_type != 'integrated'
 
             group_scores = (
                 scores.view(bsz * seq_len, self.n_group, -1).max(dim=-1).values
@@ -491,7 +491,7 @@ class MoEGate(nn.Module):
             # always compute aux loss based on the naive greedy topk method
             # [bsz, seq_len * topk]
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
-            n_exp = self.n_routed_experts + (1 if self.config.enable_skip_router else 0)
+            n_exp = self.n_routed_experts + (1 if self.config.mod_type == 'integrated' else 0)
             if self.seq_aux:
                 scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
                 ce = torch.zeros(bsz, n_exp, device=hidden_states.device)
@@ -504,6 +504,8 @@ class MoEGate(nn.Module):
                     dim=1
                 ).mean() * self.alpha
             else:
+                assert self.config.mod_type != 'integrated'
+                
                 mask_ce = F.one_hot(
                     topk_idx_for_aux_loss.view(-1), num_classes=n_exp
                 )
@@ -514,6 +516,40 @@ class MoEGate(nn.Module):
         else:
             aux_loss = None
         return topk_idx, topk_weight, aux_loss
+
+
+class ModRouter(nn.Module):
+    def __init__(self, config, hidden_size=None):
+        super().__init__()
+        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
+        self.mod_topk = config.staged_mod_topk
+        self.token_router = nn.Linear(self.hidden_size, 1, bias=False)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [bsz, seq_len, hidden_size]
+
+        Returns:
+            (torch.Tensor, torch.Tensor): [bsz, mod_topk], [bsz, mod_topk]
+        """
+        # bsz, seq_len
+        token_weights = self.token_router(x).squeeze(-1)
+        if self.training:
+            # topk, seq_len
+            topk_weights, topk_indices = torch.topk(token_weights, self.mod_topk, sorted=False)
+            calib_labels = torch.zeros_like(token_weights)
+            calib_labels.scatter_(1, topk_indices, 1)
+            aux_loss = F.binary_cross_entropy_with_logits(token_weights, calib_labels)
+            # adopt the trick for appending the calibration loss for sampling
+            topk_weights = AddAuxiliaryLoss.apply(topk_weights, aux_loss)
+        else:
+            assert token_weights.shape[0] == 1
+            # seq_len
+            token_weights = token_weights.squeeze(0)
+            topk_indices = torch.nonzero(token_weights > 0.5).squeeze(1)
+            topk_weights = token_weights[topk_indices]
+        return topk_weights, topk_indices
 
 
 class AddAuxiliaryLoss(torch.autograd.Function):
@@ -575,7 +611,7 @@ class DeepseekV2MoE(nn.Module):
                 )
                 for i in range(config.n_routed_experts)
             ]
-            if self.config.enable_skip_router:
+            if self.config.mod_type == 'integrated':
                 experts.append(nn.Identity())
             self.experts = nn.ModuleList(experts)
 
@@ -998,12 +1034,16 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         k_nope, value_states = torch.split(
             kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
-        kv_seq_len = value_states.shape[-2]
 
         kv_seq_len = value_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
+        if position_ids is None:
+            past_kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            position_ids = torch.arange(
+                past_kv_seq_len, past_kv_seq_len + q_len, device=hidden_states.device, dtype=torch.long
+            ).expand(hidden_states.shape[0], -1)
+        
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
 
@@ -1241,6 +1281,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        if hasattr(config, "mod_type") and config.mod_type == 'staged':
+            self.mod_router = ModRouter(config)
+        else:
+            self.register_module("mod_router", None)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1271,6 +1316,24 @@ class DeepseekV2DecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+        
+        org_hidden_states, topk_indices = None, None
+        if self.mod_router is not None:
+            if self.training:
+                org_hidden_states = hidden_states
+
+                topk_weights, topk_indices = self.mod_router(hidden_states)
+                topk_weights = topk_weights.unsqueeze(-1)
+                topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
+
+                # bsz, topk, hidden_size
+                hidden_states = torch.take_along_dim(hidden_states, topk_indices, dim=1)
+                # bsz, topk
+                position_ids = None
+                attention_mask = None
+            else:
+                return self.mod_infer(hidden_states, past_key_value, output_attentions, use_cache, **kwargs)
+            
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1292,6 +1355,73 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        if self.mod_router is not None:
+            # NOTE: This is different from the org paper
+            hidden_states = topk_weights * hidden_states
+            hidden_states = torch.scatter(org_hidden_states, 1, topk_indices, hidden_states)
+            org_hidden_states = None
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs
+    
+    @torch.no_grad()
+    def mod_infer(self, hidden_states, past_key_value, output_attentions, use_cache, **kwargs):
+        bsz = hidden_states.shape[0]
+        assert bsz == 1
+
+        org_hidden_states = hidden_states
+        topk_weights, topk_indices = self.mod_router(hidden_states)
+        
+        if topk_weights.shape[0] == 0:
+            outputs = (org_hidden_states, )
+            if output_attentions:
+                outputs += (None,)
+
+            if use_cache:
+                outputs += (past_key_value,)
+            return outputs
+        
+        topk_weights = topk_weights.unsqueeze(0).unsqueeze(-1)
+        topk_indices = topk_indices.unsqueeze(0)
+        topk_indices = topk_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
+
+        # bsz, topk, hidden_size
+        hidden_states = torch.take_along_dim(hidden_states, topk_indices, dim=1)
+
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
+
+        # Self Attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=None,
+            position_ids=None,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        # NOTE: This is different from the org paper
+        hidden_states = topk_weights * hidden_states
+        hidden_states = torch.scatter(org_hidden_states, 1, topk_indices, hidden_states)
+        org_hidden_states = None
 
         outputs = (hidden_states,)
 
