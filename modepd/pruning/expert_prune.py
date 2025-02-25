@@ -104,16 +104,16 @@ def expert_prune(args, model, train_dataloader):
 
         # Update expert weight
         for old_expert_idx, expert_idx in zip(experts_to_keep_idx, range(args.preserve_n)):
-            state_dict[f"layers.{layer_idx}.mlp.experts{expert_idx}.gate_proj.weight"] = state_dict[f"layers.{layer_idx}.mlp.experts{old_expert_idx}.gate_proj.weight"]
-            state_dict[f"layers.{layer_idx}.mlp.experts{expert_idx}.up_proj.weight"] = state_dict[f"layers.{layer_idx}.mlp.experts{old_expert_idx}.up_proj.weight"]
-            state_dict[f"layers.{layer_idx}.mlp.experts{expert_idx}.down_proj.weight"] = state_dict[f"layers.{layer_idx}.mlp.experts{old_expert_idx}.down_proj.weight"]
+            state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.gate_proj.weight"]
+            state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.up_proj.weight"]
+            state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.down_proj.weight"]
         # Remove pruned experts
         for reoved_expert_idx in range(args.preserve_n, num_experts):
-            del state_dict[f"layers.{layer_idx}.mlp.experts{reoved_expert_idx}.gate_proj.weight"]
-            del state_dict[f"layers.{layer_idx}.mlp.experts{reoved_expert_idx}.up_proj.weight"]
-            del state_dict[f"layers.{layer_idx}.mlp.experts{reoved_expert_idx}.down_proj.weight"]
+            del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.gate_proj.weight"]
+            del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.up_proj.weight"]
+            del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.down_proj.weight"]
         # Update MoE gate weight
-        state_dict[f"layers.{layer_idx}.mlp.gate.weight"] = state_dict[f"layers.{layer_idx}.mlp.gate.weight"][experts_to_keep_idx]
+        state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"][experts_to_keep_idx]
     
     # clear handles before saving
     for handle in handles:
