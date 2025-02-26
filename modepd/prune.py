@@ -37,6 +37,7 @@ def parse_args():
 
     # MoE expert pruning related arguments
     parser.add_argument("--expert_prune", action="store_true",)
+    parser.add_argument("--preserve_n", type=int, default=4, help="Number of experts to preserve")
 
     # weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
