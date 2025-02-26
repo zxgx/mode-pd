@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from itertools import chain
+import math
 
 import torch
 from datasets import (
@@ -88,3 +89,17 @@ def build_dataset(args, tokenizer, logger=None, accelerator=None):
     #     train_dataset = split_dataset_by_node(train_dataset, rank=accelerator.process_index, world_size=accelerator.num_processes)
 
     return train_dataset
+
+
+def init_router(model, seed=42):
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    if model.config.mod_type == 'integrated':
+        for layer in model.model.layers:
+            if hasattr(layer.mlp, "gate") and layer.mlp.gate.skip_router_weight is not None:
+                torch.nn.init.kaiming_uniform_(layer.mlp.gate.skip_router_weight, a=math.sqrt(5))
+    elif model.config.mod_type == 'staged':
+        for layer in model.model.layers:
+            if hasattr(layer, "mod_router") and layer.mod_router is not None:
+                torch.nn.init.kaiming_uniform_(layer.mod_router.token_router.weight)
+

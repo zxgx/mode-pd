@@ -15,12 +15,13 @@ from accelerate.utils import set_seed
 import datasets
 import transformers
 from transformers import (
-    AutoTokenizer, AutoModelForCausalLM, GenerationConfig,
     DataCollatorForLanguageModeling,
     get_scheduler,
 )
 
-from modepd.utils import get_memory_stats, build_dataset
+from modepd.utils import get_memory_stats, build_dataset, init_router
+from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
+from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
 
 logger = get_logger(__name__)
 
@@ -47,6 +48,10 @@ def parse_args():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
 
+    parser.add_argument("--mod_type", type=str, default=None, choices=['staged', 'integrated'])
+    parser.add_argument("--staged_mod_topk", type=int, default=2048)
+    parser.add_argument("--finetune_mod_only", action="store_true",)
+
     return parser.parse_args()
 
 
@@ -67,6 +72,7 @@ def main():
         activation_checkpointing=True,
         auto_wrap_policy="transformer_based_wrap",
         mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
+        use_orig_params=args.finetune_mod_only
         # cpu_offload=True,
     )
     accelerator = Accelerator(
@@ -104,14 +110,23 @@ def main():
     #################
     # Prepare model & tokenizer
     model_name = args.model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, use_cache=False,
-        attn_implementation="flash_attention_2")
-    
-    if "DeepSeek-V2" in model_name:
-        model.generation_config = GenerationConfig.from_pretrained(model_name)
-        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+    tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
+    model = DeepseekV2ForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
+        mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
+    )
+    init_router(model)
+
+    if args.mod_type is not None and args.finetune_mod_only:
+        if args.mod_type == 'staged':
+            trainable_param_prefix = "mod_router"
+        elif args.mod_type == 'integrated':
+            trainable_param_prefix = "skip_router_weight"
+        for name, param in model.named_parameters():
+            if trainable_param_prefix in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -120,7 +135,7 @@ def main():
         f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
         main_process_only=False)
     logger.info(
-        f", model emb size: {model.get_input_embeddings().weight.shape[0]}"
+        f"Model emb size: {model.get_input_embeddings().weight.shape[0]}"
         f", tokenizer vocab size: {len(tokenizer)}")
     
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch

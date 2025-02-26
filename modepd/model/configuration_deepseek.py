@@ -154,6 +154,8 @@ class DeepseekV2Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
+        mod_type=None,
+        staged_mod_topk=2048,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -196,6 +198,8 @@ class DeepseekV2Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
+        self.mod_type = mod_type
+        self.staged_mod_topk = staged_mod_topk
 
         super().__init__(
             pad_token_id=pad_token_id,
