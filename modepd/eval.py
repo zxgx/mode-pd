@@ -7,6 +7,11 @@ import numpy as np
 import torch
 import lm_eval
 from lm_eval.models.huggingface import HFLM
+from transformers.models.auto import AutoTokenizer
+from transformers import AutoConfig
+from transformers.models.auto.tokenization_auto import TOKENIZER_MAPPING
+from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
+from modepd.model.configuration_deepseek import DeepseekV2Config
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -68,6 +73,10 @@ def main():
     logging.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', None)}")
     args = get_args()
     logging.info(f"{pformat(vars(args), indent=2, width=120)}")
+
+    config = DeepseekV2Config()
+    AutoTokenizer.register(DeepseekTokenizerFast, config.__class__)
+    TOKENIZER_MAPPING.register(config.__class__, (DeepseekTokenizerFast, None))
 
     hf_model = args.hf_model
     
