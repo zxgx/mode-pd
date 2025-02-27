@@ -3,8 +3,10 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from modepd.model.modeling_deepseek import MoEGate,DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
+from modepd.model.modeling_deepseek import MoEGate, DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
 
+
+@torch.no_grad()
 def expert_prune(args, model, train_dataloader):
     
     # Move the model to the GPU 
@@ -16,8 +18,8 @@ def expert_prune(args, model, train_dataloader):
     scores, denominator = {}, {}
 
     new_config = deepcopy(model.config)
-    new_config.n_routed_experts = args.preserve_n
-    new_config.num_experts_per_tok = min(args.preserve_n, new_config.num_experts_per_tok)
+    new_config.n_routed_experts = args.preserve_n_experts
+    new_config.num_experts_per_tok = min(args.preserve_n_experts, new_config.num_experts_per_tok)
     new_model = DeepseekV2ForCausalLM(config=new_config)
 
     # Get MoE model info
@@ -40,8 +42,8 @@ def expert_prune(args, model, train_dataloader):
     # Register forward hooks
     for i in valid_moe_layer_indices:
         current_layer_num_experts = num_experts[i] if isinstance(num_experts, list) else num_experts
-        if current_layer_num_experts > args.preserve_n:
-            layer = model.model.layers[i] # DeepseekV2DecoderLayer with MoE layer and number of experts > preserve_n
+        if current_layer_num_experts > args.preserve_n_experts:
+            layer = model.model.layers[i] # DeepseekV2DecoderLayer with MoE layer and number of experts > preserve_n_experts
 
             def create_hook(layer_idx):
                 def stateful_hook(module, input, output):
@@ -97,18 +99,18 @@ def expert_prune(args, model, train_dataloader):
         # Get topK experts 
         _, experts_to_keep_idx = torch.topk(
             score,
-            args.preserve_n,
+            args.preserve_n_experts,
             largest=True
         )
         experts_to_keep_idx = sorted(experts_to_keep_idx.tolist())
 
         # Update expert weight
-        for old_expert_idx, expert_idx in zip(experts_to_keep_idx, range(args.preserve_n)):
+        for old_expert_idx, expert_idx in zip(experts_to_keep_idx, range(args.preserve_n_experts)):
             state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.gate_proj.weight"]
             state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.up_proj.weight"]
             state_dict[f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.experts.{old_expert_idx}.down_proj.weight"]
         # Remove pruned experts
-        for reoved_expert_idx in range(args.preserve_n, num_experts):
+        for reoved_expert_idx in range(args.preserve_n_experts, num_experts):
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.gate_proj.weight"]
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.up_proj.weight"]
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.down_proj.weight"]
