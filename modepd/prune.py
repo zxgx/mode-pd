@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional
 from torch.utils.data import DataLoader
 from transformers import (
-    # AutoTokenizer, AutoModelForCausalLM, 
+    AutoTokenizer, # AutoModelForCausalLM, 
     GenerationConfig,
     DataCollatorForLanguageModeling
 )
@@ -32,22 +32,25 @@ def parse_args():
 
     # transformer layer pruning related arguments
     parser.add_argument("--layer_prune", action="store_true",)
-    parser.add_argument("--drop_n", type=int, default=13,)
-    parser.add_argument("--compressed_model_save_path", type=str, default="demo/DeepSeek-V2-Lite-Chat-Compressed",)
+    parser.add_argument("--drop_n_layers", type=int, default=13,)
 
     # MoE expert pruning related arguments
     parser.add_argument("--expert_prune", action="store_true",)
-    parser.add_argument("--preserve_n", type=int, default=4, help="Number of experts to preserve")
+    parser.add_argument("--preserve_n_experts", type=int, default=30, help="Number of experts to preserve")
 
-    # weight pruning related arguments
+    # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
+    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "wa"])
+    parser.add_argument("--preserve_channels_in_percent", type=float, default=0.7)
+
+    parser.add_argument("--compressed_model_save_path", type=str, default="demo/DeepSeek-V2-Lite-Chat-Compressed",)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     model_name = args.model_name_or_path
-    tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite-Chat")
     model = DeepseekV2ForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2",
         mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
@@ -59,23 +62,29 @@ def main():
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
     
     model.eval()
+    model.cuda()
+    text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
+    inputs = tokenizer(text, return_tensors="pt")
+    outputs = model.generate(**inputs.to(model.device), max_new_tokens=100)
 
-    import pdb
-    pdb.set_trace()
+    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    print(result)
+    exit(0)
 
-    train_dataset = build_dataset(args, tokenizer)
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    train_dataloader = DataLoader(
-        train_dataset,
-        collate_fn=data_collator,
-        batch_size=1,
-        num_workers=4,
-        pin_memory=True,
-    )
+    train_dataloader = None
+    # train_dataset = build_dataset(args, tokenizer)
+    # data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    # train_dataloader = DataLoader(
+    #     train_dataset,
+    #     collate_fn=data_collator,
+    #     batch_size=1,
+    #     num_workers=4,
+    #     pin_memory=True,
+    # )
 
-    for batch in train_dataloader:
-        print(f"{batch['input_ids'].shape}")
-        break
+    # for batch in train_dataloader:
+    #     print(f"{batch['input_ids'].shape}")
+    #     break
 
     if args.layer_prune:
         new_model = layer_prune(args, model, train_dataloader)
