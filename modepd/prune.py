@@ -4,17 +4,22 @@ import torch
 import torch.nn.functional
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoTokenizer, # AutoModelForCausalLM, 
+    AutoConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM, 
     GenerationConfig,
     DataCollatorForLanguageModeling
 )
 
 from modepd.utils import build_dataset, init_router
-from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
-from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
+from modepd.model.configuration_deepseek import DeepseekV2Config
+from modepd.model.modeling_deepseek import DeepseekV2Model, DeepseekV2ForCausalLM
 from modepd.pruning.layer_prune import layer_prune
 from modepd.pruning.expert_prune import expert_prune
 from modepd.pruning.weight_prune import weight_prune
+
+
+AutoConfig.register("deepseek_v2_compressed", DeepseekV2Config)
+AutoModel.register(DeepseekV2Config, DeepseekV2Model)
+AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
 
 
 def parse_args():
@@ -62,29 +67,20 @@ def main():
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
     
     model.eval()
-    model.cuda()
-    text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
-    inputs = tokenizer(text, return_tensors="pt")
-    outputs = model.generate(**inputs.to(model.device), max_new_tokens=100)
 
-    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(result)
-    exit(0)
+    train_dataset = build_dataset(args, tokenizer)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    train_dataloader = DataLoader(
+        train_dataset,
+        collate_fn=data_collator,
+        batch_size=1,
+        num_workers=4,
+        pin_memory=True,
+    )
 
-    train_dataloader = None
-    # train_dataset = build_dataset(args, tokenizer)
-    # data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    # train_dataloader = DataLoader(
-    #     train_dataset,
-    #     collate_fn=data_collator,
-    #     batch_size=1,
-    #     num_workers=4,
-    #     pin_memory=True,
-    # )
-
-    # for batch in train_dataloader:
-    #     print(f"{batch['input_ids'].shape}")
-    #     break
+    for batch in train_dataloader:
+        print(f"{batch['input_ids'].shape}")
+        break
 
     if args.layer_prune:
         new_model = layer_prune(args, model, train_dataloader)
@@ -96,6 +92,8 @@ def main():
         raise NotImplementedError("Only layer prune is supported for now")
             
     # Save
+    if hasattr(new_model.config, "auto_map"):
+        del new_model.config.auto_map
     new_model.save_pretrained(args.compressed_model_save_path)
     tokenizer.save_pretrained(args.compressed_model_save_path)
 

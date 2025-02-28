@@ -157,6 +157,6 @@ coverage.xml
 .coverage
 .testmondata*
 
-logs
 logs/
 wandb/
+local_scripts/
