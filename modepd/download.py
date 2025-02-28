@@ -8,7 +8,11 @@ models = [
     # 'deepseek-ai/DeepSeek-V2-Lite', 
     # 'deepseek-ai/DeepSeek-V2-Lite-Chat', 
     'Qwen/Qwen2.5-3B', 
-    # 'Qwen/Qwen2.5-3B-Instruct',
+    'Qwen/Qwen2.5-3B-Instruct',
+    'google/gemma-2-2b-it',
+    'google/gemma-2-2b',
+    'moonshotai/Moonlight-16B-A3B',
+    'moonshotai/Moonlight-16B-A3B-Instruct',
 ]
 for model in models:
     snapshot_download(model)

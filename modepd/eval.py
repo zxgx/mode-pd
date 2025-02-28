@@ -7,11 +7,10 @@ import numpy as np
 import torch
 import lm_eval
 from lm_eval.models.huggingface import HFLM
-from transformers.models.auto import AutoTokenizer
-from transformers import AutoConfig
-from transformers.models.auto.tokenization_auto import TOKENIZER_MAPPING
-from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
+from transformers import AutoConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM
+
 from modepd.model.configuration_deepseek import DeepseekV2Config
+from modepd.model.modeling_deepseek import DeepseekV2Model, DeepseekV2ForCausalLM
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -19,6 +18,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+AutoConfig.register("deepseek_v2_compressed", DeepseekV2Config)
+AutoModel.register(DeepseekV2Config, DeepseekV2Model)
+AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
 
 def _handle_non_serializable(o):
     """Copied from https://github.com/meta-llama/llama-recipes/blob/b5f64c0b69d7ff85ec186d964c6c557d55025969/tools/benchmarks/llm_eval_harness/eval.py#L18
@@ -40,21 +42,31 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=64)
     # lm_eval config
     parser.add_argument(
-        "--tasks", type=str, nargs='+', #default=['mmlu', 'winogrande'])
+        "--tasks", type=str, nargs='+',
         default=[
             # English
-            "mmlu", "winogrande", "hellaswag",
+            #   huggingface dataset id
+            #       mmlu: hails/mmlu_no_train
+            #       winogrande: winogrande, winogrande_xl
+            #       hellaswag: hellaswag
+            "mmlu", "winogrande", # "hellaswag",
             # Math
-            "gsm8k", "hendrycks_math", 
+            #   huggingface dataset id
+            #       gsm8k: gsm8k, main
+            #       hendrycks_math: EleutherAI/hendrycks_math, algebra
+            "gsm8k", "minerva_math", 
             # Chinese
+            #   huggingface dataset id
+            #       ceval-valid: ceval/ceval-exam
+            #       cmmlu: haonan-li/cmmlu
             "ceval-valid", "cmmlu",
             ])
     parser.add_argument(
-        "--num_fewshots", type=int, nargs='+', #default=[5, 5])
+        "--num_fewshots", type=int, nargs='+',
         default=[
             # English
             # "mmlu", "winogrande", "hellaswag", 
-            5, 5, 10,
+            5, 5, #10,
             # Math
             # "gsm8k", "hendrycks_math", 
             8, 4,
@@ -73,10 +85,6 @@ def main():
     logging.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', None)}")
     args = get_args()
     logging.info(f"{pformat(vars(args), indent=2, width=120)}")
-
-    config = DeepseekV2Config()
-    AutoTokenizer.register(DeepseekTokenizerFast, config.__class__)
-    TOKENIZER_MAPPING.register(config.__class__, (DeepseekTokenizerFast, None))
 
     hf_model = args.hf_model
     
