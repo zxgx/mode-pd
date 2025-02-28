@@ -4,7 +4,7 @@ import torch
 
 from modepd.model.modeling_deepseek import DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
 
-
+@torch.no_grad()
 def layer_prune(args, model, train_dataloader):
     model.cuda()
     device = torch.cuda.current_device()
@@ -56,7 +56,7 @@ def layer_prune(args, model, train_dataloader):
     # prune the model
     similarities_drop_1 = similarities[:, 0].view(-1)
     sorted_similarities, sorted_layer_id = torch.sort(similarities_drop_1, dim=0, descending=True)
-    dropped_layer_list = sorted_layer_id[:args.drop_n].tolist()
+    dropped_layer_list = sorted_layer_id[:args.drop_n_layers].tolist()
 
     reserved_layer_list = sorted(list(set(range(num_layers)) - set(dropped_layer_list)))
     layer_id_mapping = {}

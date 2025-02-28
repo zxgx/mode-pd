@@ -578,7 +578,7 @@ class DeepseekV2MoE(nn.Module):
     A mixed expert module containing shared experts.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
@@ -602,12 +602,18 @@ class DeepseekV2MoE(nn.Module):
                 ]
             )
         else:
+            if hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
+                assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes
+                routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
+                assert len(routed_intermediate_sizes) == config.n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {config.n_routed_experts}"
+            else:
+                routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(config.n_routed_experts)]
             self.ep_size = 1
             self.experts_per_rank = config.n_routed_experts
             self.ep_rank = 0
             experts = [
                 DeepseekV2MLP(
-                    config, intermediate_size=config.moe_intermediate_size
+                    config, intermediate_size=routed_intermediate_sizes[i]
                 )
                 for i in range(config.n_routed_experts)
             ]
@@ -617,9 +623,13 @@ class DeepseekV2MoE(nn.Module):
 
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            if hasattr(config, "shared_intermediate_sizes") and config.shared_intermediate_sizes is not None:
+                assert layer_idx in config.shared_intermediate_sizes
+                shared_intermediate_size = config.shared_intermediate_sizes[layer_idx]
+            else:
+                shared_intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = DeepseekV2MLP(
-                config=config, intermediate_size=intermediate_size
+                config=config, intermediate_size=shared_intermediate_size
             )
 
     def forward(self, hidden_states):
@@ -1266,7 +1276,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         self.mlp = (
-            DeepseekV2MoE(config)
+            DeepseekV2MoE(config, layer_idx)
             if (
                 config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
