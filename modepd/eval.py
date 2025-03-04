@@ -45,34 +45,29 @@ def get_args():
         "--tasks", type=str, nargs='+',
         default=[
             # English
-            #   huggingface dataset id
-            #       mmlu: hails/mmlu_no_train
-            #       winogrande: winogrande, winogrande_xl
-            #       hellaswag: hellaswag
-            "mmlu", "winogrande", # "hellaswag",
+            "mmlu", 
             # Math
-            #   huggingface dataset id
-            #       gsm8k: gsm8k, main
-            #       hendrycks_math: EleutherAI/hendrycks_math, algebra
-            "gsm8k", "minerva_math", 
+            "gsm8k",
+            # Code
+            "humaneval",
             # Chinese
-            #   huggingface dataset id
-            #       ceval-valid: ceval/ceval-exam
-            #       cmmlu: haonan-li/cmmlu
-            "ceval-valid", "cmmlu",
+            "cmmlu",
             ])
     parser.add_argument(
         "--num_fewshots", type=int, nargs='+',
         default=[
             # English
-            # "mmlu", "winogrande", "hellaswag", 
-            5, 5, #10,
+            # "mmlu",
+            5,
             # Math
-            # "gsm8k", "hendrycks_math", 
-            8, 4,
+            # "gsm8k",
+            8,
+            # Code
+            # "humaneval"
+            0,
             # Chinese
-            # "ceval", "cmmlu",
-            5, 5,
+            # "cmmlu",
+            5,
             ])
     parser.add_argument("--limit", type=int, default=None)
 
@@ -113,13 +108,15 @@ def main():
     lm_eval_kwargs = {
         "limit": args.limit,
         "log_samples": False,
+        "confirm_run_unsafe_code": True,
     }
     
     lm_obj = HFLM(hf_model, parallelize=True, **model_kwargs)
-    print(f"model device: {lm_obj.model.device}")
-    # lm_obj.model.cuda()
-    if "deepseek-ai/DeepSeek-V2.5-1210" == hf_model:
+    if "DeepSeek-V2" in hf_model:
+        lm_obj.model.config.use_cache = True
+        lm_obj.model.generation_config.use_cache = True
         lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
+    print(f"model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
