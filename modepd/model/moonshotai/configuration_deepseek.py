@@ -113,7 +113,7 @@ class DeepseekV3Config(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "deepseek_v3"
+    model_type = "deepseek_v3_compressed"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -159,6 +159,8 @@ class DeepseekV3Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
+        routed_intermediate_sizes=None,
+        shared_intermediate_sizes=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -202,6 +204,12 @@ class DeepseekV3Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
+        if routed_intermediate_sizes is not None:
+            routed_intermediate_sizes = {int(k): v for k, v in routed_intermediate_sizes.items()}
+        self.routed_intermediate_sizes = routed_intermediate_sizes
+        if shared_intermediate_sizes is not None:
+            shared_intermediate_sizes = {int(k): v for k, v in shared_intermediate_sizes.items()}
+        self.shared_intermediate_sizes = shared_intermediate_sizes
 
         super().__init__(
             pad_token_id=pad_token_id,
