@@ -7,9 +7,47 @@ from datasets import (
     load_dataset, 
     # interleave_datasets,
 )
+from transformers import AutoConfig, GenerationConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM
+
+from modepd.model.deepseek_v2.configuration_deepseek import DeepseekV2Config
+from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2Model, DeepseekV2ForCausalLM
+from modepd.model.moonshotai.configuration_deepseek import DeepseekV3Config
+from modepd.model.moonshotai.modeling_deepseek import DeepseekV3Model, DeepseekV3ForCausalLM
+from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
 
 
 GB = 1024**3
+
+
+def register_custom_model():
+    AutoConfig.register("deepseek_v2_compressed", DeepseekV2Config)
+    AutoModel.register(DeepseekV2Config, DeepseekV2Model)
+    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
+
+    AutoConfig.register("deepseek_v3_compressed", DeepseekV3Config)
+    AutoModel.register(DeepseekV3Config, DeepseekV3Model)
+    AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM)
+    AutoTokenizer.register(DeepseekV3Config, TikTokenTokenizer)
+
+
+def prepare_model_and_tokenizer(model_name_or_path, mode='prune', use_cache=False):
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    causal_model_class = AutoModelForCausalLM
+    if "DeepSeek-V2" in model_name_or_path and mode == 'prune':
+        causal_model_class = DeepseekV2ForCausalLM
+    elif "Moonlight-16B-A3B" in model_name_or_path and mode == 'prune':
+        causal_model_class = DeepseekV3ForCausalLM
+    else:
+        raise KeyError(f"unsupport model: {model_name_or_path}")
+    model = causal_model_class.from_pretrained(
+        model_name_or_path, torch_dtype=torch.bfloat16, use_cache=use_cache, attn_implementation="flash_attention_2",
+    )
+
+    if "DeepSeek-V2" in model_name_or_path:
+        model.generation_config = GenerationConfig.from_pretrained(model_name_or_path)
+        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
+    return model, tokenizer
 
 
 def get_memory_stats():

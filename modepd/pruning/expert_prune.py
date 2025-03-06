@@ -2,8 +2,7 @@ from copy import deepcopy
 
 import torch
 from torch import nn
-
-from modepd.model.modeling_deepseek import MoEGate, DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
+from transformers import AutoModelForCausalLM
 
 
 @torch.no_grad()
@@ -20,7 +19,7 @@ def expert_prune(args, model, train_dataloader):
     new_config = deepcopy(model.config)
     new_config.n_routed_experts = args.preserve_n_experts
     new_config.num_experts_per_tok = min(args.preserve_n_experts, new_config.num_experts_per_tok)
-    new_model = DeepseekV2ForCausalLM(config=new_config)
+    new_model = AutoModelForCausalLM.from_config(config=new_config)
 
     # Get MoE model info
     num_layers = model.config.num_hidden_layers
@@ -116,6 +115,7 @@ def expert_prune(args, model, train_dataloader):
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.down_proj.weight"]
         # Update MoE gate weight
         state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"][experts_to_keep_idx]
+        state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"][experts_to_keep_idx]
     
     # clear handles before saving
     for handle in handles:

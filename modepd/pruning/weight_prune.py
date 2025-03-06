@@ -4,8 +4,10 @@ import logging
 
 import torch
 from torch import nn
+from transformers import AutoModelForCausalLM
 
-from modepd.model.modeling_deepseek import DeepseekV2MoE, DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
+from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MoE
+from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MoE
 
 
 @torch.no_grad()
@@ -22,7 +24,7 @@ def weight_prune_by_norm(args, model):
 
     for i in range(num_layer):
         mlp = model.model.layers[i].mlp
-        if not isinstance(mlp, DeepseekV2MoE):
+        if not isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE)):
             continue
         
         # prune routed experts
@@ -69,7 +71,7 @@ def weight_prune_by_norm(args, model):
     new_config.shared_intermediate_sizes = shared_intermediate_sizes
 
     # build new model
-    new_model = DeepseekV2ForCausalLM(config=new_config)
+    new_model = AutoModelForCausalLM.from_config(config=new_config)
 
     # prepare model state dict
     # model.cpu()
@@ -96,5 +98,3 @@ def weight_prune_by_norm(args, model):
 def weight_prune(args, model, train_dataloader):
     if args.weight_prune_metric == 'norm':
         return weight_prune_by_norm(args, model)
-
-

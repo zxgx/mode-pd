@@ -4,13 +4,15 @@ import argparse
 from pprint import pformat
 import json
 import numpy as np
+
 import torch
 import lm_eval
 from lm_eval.models.huggingface import HFLM
-from transformers import AutoConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM
 
-from modepd.model.configuration_deepseek import DeepseekV2Config
-from modepd.model.modeling_deepseek import DeepseekV2Model, DeepseekV2ForCausalLM
+from modepd.utils import register_custom_model
+
+
+register_custom_model()
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -18,9 +20,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-AutoConfig.register("deepseek_v2_compressed", DeepseekV2Config)
-AutoModel.register(DeepseekV2Config, DeepseekV2Model)
-AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
 
 def _handle_non_serializable(o):
     """Copied from https://github.com/meta-llama/llama-recipes/blob/b5f64c0b69d7ff85ec186d964c6c557d55025969/tools/benchmarks/llm_eval_harness/eval.py#L18
@@ -77,7 +76,6 @@ def get_args():
 
 
 def main():
-    logging.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', None)}")
     args = get_args()
     logging.info(f"{pformat(vars(args), indent=2, width=120)}")
 
@@ -89,7 +87,8 @@ def main():
         "dtype": args.dtype,
         "device_map": "auto",
         "batch_size": args.batch_size, #"auto:4",
-        "backend": "causal"
+        "backend": "causal",
+        "local_files_only": True
     }
 
     if "deepseek-ai/DeepSeek-V2.5-1210" == hf_model:
@@ -112,9 +111,9 @@ def main():
     }
     
     lm_obj = HFLM(hf_model, parallelize=True, **model_kwargs)
+    lm_obj.model.config.use_cache = True
+    lm_obj.model.generation_config.use_cache = True
     if "DeepSeek-V2" in hf_model:
-        lm_obj.model.config.use_cache = True
-        lm_obj.model.generation_config.use_cache = True
         lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
     print(f"model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     

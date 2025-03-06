@@ -479,7 +479,7 @@ class DeepseekV3MoE(nn.Module):
     A mixed expert module containing shared experts.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
@@ -504,7 +504,7 @@ class DeepseekV3MoE(nn.Module):
             )
         else:
             if hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
-                assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes
+                assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes, f"layer idx: {layer_idx} is not in config.routed_intermediate_sizes: {config.routed_intermediate_sizes}"
                 routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
                 assert len(routed_intermediate_sizes) == config.n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {config.n_routed_experts}"
             else:
@@ -1161,7 +1161,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         )
 
         self.mlp = (
-            DeepseekV3MoE(config)
+            DeepseekV3MoE(config, layer_idx)
             if (
                 config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
