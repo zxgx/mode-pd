@@ -39,6 +39,7 @@ def get_args():
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--dtype", type=torch.dtype, default=torch.bfloat16)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--model_parallel", action="store_true")
     # lm_eval config
     parser.add_argument(
         "--tasks", type=str, nargs='+',
@@ -88,7 +89,6 @@ def main():
         "device_map": "auto",
         "batch_size": args.batch_size, #"auto:4",
         "backend": "causal",
-        "local_files_only": True
     }
 
     if "deepseek-ai/DeepSeek-V2.5-1210" == hf_model:
@@ -110,12 +110,13 @@ def main():
         "confirm_run_unsafe_code": True,
     }
     
-    lm_obj = HFLM(hf_model, parallelize=True, **model_kwargs)
+    lm_obj = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
+    lm_obj.model.cuda()
     lm_obj.model.config.use_cache = True
     lm_obj.model.generation_config.use_cache = True
     if "DeepSeek-V2" in hf_model:
         lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
-    print(f"model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
+    print(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
