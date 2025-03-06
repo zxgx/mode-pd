@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 from tqdm.auto import tqdm
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
@@ -19,12 +20,11 @@ from transformers import (
     get_scheduler,
 )
 
-from modepd.utils import get_memory_stats, build_dataset, init_router
-from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
-from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
+from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
+
 
 logger = get_logger(__name__)
-
+register_custom_model()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -109,24 +109,7 @@ def main():
 
     #################
     # Prepare model & tokenizer
-    model_name = args.model_name_or_path
-    tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
-    model = DeepseekV2ForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
-        mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
-    )
-    init_router(model)
-
-    if args.mod_type is not None and args.finetune_mod_only:
-        if args.mod_type == 'staged':
-            trainable_param_prefix = "mod_router"
-        elif args.mod_type == 'integrated':
-            trainable_param_prefix = "skip_router_weight"
-        for name, param in model.named_parameters():
-            if trainable_param_prefix in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+    model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -215,6 +198,8 @@ def main():
     # The trackers initializes automatically on the main process.
     if args.with_tracking:
         experiment_config = vars(args)
+        # TensorBoard cannot log Enums, need the raw value
+        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         accelerator.init_trackers("clm_no_trainer", experiment_config)
 
     #################
@@ -231,7 +216,7 @@ def main():
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
-    starting_epoch = 0
+    # starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
@@ -253,9 +238,9 @@ def main():
 
         # need to multiply `gradient_accumulation_steps` to reflect real steps
         resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-        starting_epoch = resume_step // len(train_dataloader)
+        # starting_epoch = resume_step // len(train_dataloader)
         completed_steps = resume_step // args.gradient_accumulation_steps
-        resume_step -= starting_epoch * len(train_dataloader)
+        # resume_step -= starting_epoch * len(train_dataloader)
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)

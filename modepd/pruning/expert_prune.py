@@ -115,7 +115,8 @@ def expert_prune(args, model, train_dataloader):
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{reoved_expert_idx}.down_proj.weight"]
         # Update MoE gate weight
         state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"][experts_to_keep_idx]
-        state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"][experts_to_keep_idx]
+        if model.config.topk_method == "noaux_tc":
+            state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"][experts_to_keep_idx]
     
     # clear handles before saving
     for handle in handles:
