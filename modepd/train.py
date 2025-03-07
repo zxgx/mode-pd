@@ -125,15 +125,16 @@ def main():
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
-        assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
+        model.resize_token_embeddings(len(tokenizer))
+        # assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
     
     train_dataset = build_dataset(args, tokenizer, logger, accelerator)
 
     # Log a few random samples from the training set:
-    data_iter = iter(train_dataset)
-    for index in range(3):
-        sample = next(data_iter)
-        logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} sample {index}: {sample['input_ids'][:5]}", main_process_only=False)
+    # data_iter = iter(train_dataset)
+    # for index in range(3):
+    #     sample = next(data_iter)
+    #     logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} sample {index}: {sample['input_ids'][:5]}", main_process_only=False)
     
     # 3. DataLoaders creation
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -144,9 +145,9 @@ def main():
         batch_size=args.per_device_train_batch_size,
     )
 
-    for batch in train_dataloader:
-        logger.info(f"{batch['input_ids'].shape}", main_process_only=False)
-        break
+    # for batch in train_dataloader:
+    #     logger.info(f"{batch['input_ids'].shape}", main_process_only=False)
+    #     break
 
     #################
     # Prepare optimizer and scheduler
@@ -181,8 +182,8 @@ def main():
     )
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"{model}")
     logger.info(
-        f"{model}\n"
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
         f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
         , main_process_only=False)
@@ -199,7 +200,7 @@ def main():
     if args.with_tracking:
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
-        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
+        # experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         accelerator.init_trackers("clm_no_trainer", experiment_config)
 
     #################

@@ -437,7 +437,7 @@ class MoEGate(nn.Module):
 
         ### select top-k experts
         if self.topk_method == "noaux_tc":
-            assert (not self.training) or (hasattr(config, "ep_size") and config.ep_size == 1) 
+            assert (not self.training) or (hasattr(self.config, "ep_size") and self.config.ep_size == 1) 
             scores_for_choice = scores.view(bsz * seq_len, -1) + self.e_score_correction_bias.unsqueeze(0)
             group_scores = (
                 scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim = -1)
