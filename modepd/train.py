@@ -9,7 +9,7 @@ import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
-from accelerate import Accelerator, FullyShardedDataParallelPlugin
+from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 
@@ -28,19 +28,19 @@ register_custom_model()
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--report_to", type=str, default="wandb",)
+    parser.add_argument("--report_to", type=str, default="tensorboard",)
     parser.add_argument("--output_dir", type=str, default=None,)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
-    parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
-    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
+    parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
+    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",) # None
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
-    parser.add_argument("--learning_rate", type=float, default=2.4e-4,)
-    parser.add_argument("--lr_scheduler_type", type=str, default="linear",)
+    parser.add_argument("--learning_rate", type=float, default=4.2e-4,)
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
     parser.add_argument("--checkpointing_steps", type=int, default=None,)
@@ -67,17 +67,15 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["project_dir"] = args.output_dir
 
-    fsdp_plugin = FullyShardedDataParallelPlugin(
-        sharding_strategy="FULL_SHARD",
-        activation_checkpointing=True,
-        auto_wrap_policy="transformer_based_wrap",
-        mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=args.finetune_mod_only
-        # cpu_offload=True,
+    deepspeed_plugin = DeepSpeedPlugin(
+        gradient_clipping=1.0,
+        zero_stage=3,
+        zero3_save_16bit_model=True,
     )
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        fsdp_plugin=fsdp_plugin,
+        deepspeed_plugin=deepspeed_plugin,
+        mixed_precision="bf16",
         **accelerator_log_kwargs
     )
     
@@ -217,31 +215,33 @@ def main():
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
+    resume_step = None
     # starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            checkpoint_path = args.resume_from_checkpoint
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
+    if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
+        dirs = [f.path for f in os.scandir(args.resume_from_checkpoint) if f.is_dir() and f.name.startswith("step_")]
+        if len(dirs) > 0:
             dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-            checkpoint_path = path
+            checkpoint_path = dirs[-1]
             path = os.path.basename(checkpoint_path)
 
-        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
-        accelerator.load_state(checkpoint_path)
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
+            accelerator.load_state(checkpoint_path)
+            # Extract `step_{i}`
+            training_difference = os.path.splitext(path)[0]
 
-        # need to multiply `gradient_accumulation_steps` to reflect real steps
-        resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-        # starting_epoch = resume_step // len(train_dataloader)
-        completed_steps = resume_step // args.gradient_accumulation_steps
-        # resume_step -= starting_epoch * len(train_dataloader)
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            completed_steps = resume_step // args.gradient_accumulation_steps
+            logger.info(
+                f"Resumed from checkpoint: {checkpoint_path}, resume steps (w. grad acc): {resume_step}, "
+                f"completed_steps: {completed_steps}"
+            )
+        else:
+            logger.warning(
+                f"Please be aware that resume_from_checkpoint is specified as {args.resume_from_checkpoint}, "
+                f"but no ckpt is detected"
+            )
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -277,7 +277,7 @@ def main():
                     output_dir = os.path.join(args.output_dir, output_dir)
                 accelerator.save_state(output_dir)
         
-        if args.with_tracking:
+        if args.with_tracking and completed_steps > 0:
             accelerator.log(
                 {
                 # "perplexity": perplexity
