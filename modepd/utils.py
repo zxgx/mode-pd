@@ -1,3 +1,4 @@
+import os
 from contextlib import nullcontext
 from itertools import chain
 import math
@@ -68,7 +69,11 @@ def build_dataset(args, tokenizer, logger=None, accelerator=None):
     # zh = load_dataset("HuggingFaceFW/fineweb-2", name="cmn_Hani", split="train", streaming=True)
     # ds = interleave_datasets([en, zh], probabilities=[0.8, 0.2], seed=42)
     # ds = en
-    raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name, streaming=True)
+    streaming = hasattr(args, "streaming_dataset") and args.streaming_dataset
+    if os.path.exists(args.dataset_name_or_path):
+        raw_datasets = load_dataset(args.data_type, data_dir=args.dataset_name_or_path, name=args.dataset_config_name, streaming=streaming)
+    else:
+        raw_datasets = load_dataset(args.dataset_name_or_path, args.dataset_config_name, streaming=streaming)
     
     #################
     # Preprocessing the datasets.

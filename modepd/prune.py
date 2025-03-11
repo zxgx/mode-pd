@@ -24,8 +24,11 @@ def parse_args():
     # parser.add_argument("--staged_mod_topk", type=int, default=2048)
 
     # build a dataset for pruning
-    parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
-    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
+    parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
+    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",) # None
+    parser.add_argument("--data_type", type=str, default="parquet")
+    parser.add_argument("--streaming_dataset", action='store_true')
+
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--max_steps", type=int, default=100,)
 

@@ -33,13 +33,17 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
-    parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
+
+    parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
     parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",) # None
+    parser.add_argument("--data_type", type=str, default="parquet")
+    parser.add_argument("--streaming_dataset", action='store_true')
+
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
-    parser.add_argument("--learning_rate", type=float, default=4.2e-4,)
+    parser.add_argument("--learning_rate", type=float, default=1e-3,)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
@@ -69,7 +73,7 @@ def main():
 
     deepspeed_plugin = DeepSpeedPlugin(
         gradient_clipping=1.0,
-        zero_stage=3,
+        zero_stage=2,
         zero3_save_16bit_model=True,
     )
     accelerator = Accelerator(

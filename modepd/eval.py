@@ -5,14 +5,13 @@ from pprint import pformat
 import json
 import numpy as np
 
+from modepd.utils import register_custom_model
+register_custom_model()
+
 import torch
 import lm_eval
 from lm_eval.models.huggingface import HFLM
 
-from modepd.utils import register_custom_model
-
-
-register_custom_model()
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
