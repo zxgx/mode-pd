@@ -59,7 +59,10 @@ def get_memory_stats():
     return alloc, max_alloc, reserved, max_reserved
 
 
-def build_dataset(args, tokenizer, logger=None, accelerator=None):
+def build_dataset(
+    dataset_name_or_path, dataset_config_name, streaming, tokenizer, split, 
+    data_type=None, block_size=4*1024, logger=None, accelerator=None,
+):
     main_process_context = accelerator.main_process_first if accelerator is not None else nullcontext
 
     #################
@@ -69,38 +72,42 @@ def build_dataset(args, tokenizer, logger=None, accelerator=None):
     # zh = load_dataset("HuggingFaceFW/fineweb-2", name="cmn_Hani", split="train", streaming=True)
     # ds = interleave_datasets([en, zh], probabilities=[0.8, 0.2], seed=42)
     # ds = en
-    streaming = hasattr(args, "streaming_dataset") and args.streaming_dataset
-    if os.path.exists(args.dataset_name_or_path):
-        raw_datasets = load_dataset(args.data_type, data_dir=args.dataset_name_or_path, name=args.dataset_config_name, streaming=streaming)
+    if os.path.exists(dataset_name_or_path) and data_type is not None:
+        raw_dataset = load_dataset(data_type, data_dir=dataset_name_or_path, name=dataset_config_name, split=split, streaming=streaming)
     else:
-        raw_datasets = load_dataset(args.dataset_name_or_path, args.dataset_config_name, streaming=streaming)
+        raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
+    
+    # raw_iter = iter(raw_datasets['train'])
+    # for index in range(8):
+    #     sample = next(raw_iter)
+    #     logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} raw sample {index}: {sample['text']}", main_process_only=False)
     
     #################
     # Preprocessing the datasets.
     # 1. Only load text fields for the dataloader
-    column_names = raw_datasets["train"].column_names
+    column_names = raw_dataset.column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     def tokenize_function(examples):
         return tokenizer(examples[text_column_name])
 
     with main_process_context():
-        tokenized_datasets = raw_datasets.map(
+        tokenized_dataset = raw_dataset.map(
             tokenize_function,
             batched=True,
             remove_columns=column_names,
         )
 
     # 2. Padding to max length    
-    if args.block_size is None:
+    if block_size is None:
         block_size = tokenizer.model_max_length
     else:
-        if args.block_size > tokenizer.model_max_length and logger is not None:
+        if block_size > tokenizer.model_max_length and logger is not None:
             logger.warning(
-                f"The block_size passed ({args.block_size}) is larger than the maximum length for the model "
+                f"The block_size passed ({block_size}) is larger than the maximum length for the model "
                 f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
             )
-        block_size = min(args.block_size, tokenizer.model_max_length)
+        block_size = min(block_size, tokenizer.model_max_length)
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
     def group_texts(examples):
@@ -119,19 +126,23 @@ def build_dataset(args, tokenizer, logger=None, accelerator=None):
         return result
 
     with main_process_context():
-        lm_datasets = tokenized_datasets.map(
+        lm_dataset = tokenized_dataset.map(
             group_texts,
             batched=True,
         )
-    
-    train_dataset = lm_datasets["train"]
+
     # fine-web doesn't have validation set
     # eval_dataset = lm_datasets["validation"]
     # this logic will be handled by `accelerator.prepare`
     # if accelerator.num_processes > 1:
     #     train_dataset = split_dataset_by_node(train_dataset, rank=accelerator.process_index, world_size=accelerator.num_processes)
 
-    return train_dataset
+    # raw_iter = iter(dataset)
+    # for index in range(4):
+    #     sample = next(raw_iter)
+    #     logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} main sample {index}: {tokenizer.decode(sample['input_ids'])}", main_process_only=False)
+    
+    return lm_dataset
 
 
 def init_router(model, seed=42):
