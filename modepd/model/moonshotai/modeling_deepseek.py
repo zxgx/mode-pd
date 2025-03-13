@@ -392,11 +392,15 @@ class DeepseekV3MLP(nn.Module):
 
 
 class MoEGate(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.n_routed_experts = config.n_routed_experts
+        n_routed_experts = config.n_routed_experts
+        if isinstance(n_routed_experts, dict):
+            assert layer_idx is not None and layer_idx in n_routed_experts
+            n_routed_experts = n_routed_experts[layer_idx]
+        self.top_k = min(config.num_experts_per_tok, n_routed_experts)
+        self.n_routed_experts = n_routed_experts
         self.routed_scaling_factor = config.routed_scaling_factor
         self.scoring_func = config.scoring_func
         self.seq_aux = config.seq_aux
@@ -503,24 +507,30 @@ class DeepseekV3MoE(nn.Module):
                 ]
             )
         else:
+            n_routed_experts = config.n_routed_experts
+            if isinstance(config.n_routed_experts, dict):
+                assert layer_idx in config.n_routed_experts
+                n_routed_experts = config.n_routed_experts[layer_idx]
+
             if hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
                 assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes, f"layer idx: {layer_idx} is not in config.routed_intermediate_sizes: {config.routed_intermediate_sizes}"
                 routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
-                assert len(routed_intermediate_sizes) == config.n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {config.n_routed_experts}"
+                assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
             else:
-                routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(config.n_routed_experts)]
+                routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(n_routed_experts)]
+
             self.ep_size = 1
-            self.experts_per_rank = config.n_routed_experts
+            self.experts_per_rank = n_routed_experts
             self.ep_rank = 0
             self.experts = nn.ModuleList(
                 [
                     DeepseekV3MLP(
                         config, intermediate_size=routed_intermediate_sizes[i]
                     )
-                    for i in range(config.n_routed_experts)
+                    for i in range(n_routed_experts)
                 ]
             )
-        self.gate = MoEGate(config)
+        self.gate = MoEGate(config, layer_idx)
         if config.n_shared_experts is not None:
             if hasattr(config, "shared_intermediate_sizes") and config.shared_intermediate_sizes is not None:
                 assert layer_idx in config.shared_intermediate_sizes

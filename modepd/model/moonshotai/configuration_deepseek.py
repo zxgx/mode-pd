@@ -172,6 +172,8 @@ class DeepseekV3Config(PretrainedConfig):
         self.num_nextn_predict_layers = num_nextn_predict_layers
         self.num_attention_heads = num_attention_heads
         self.n_shared_experts = n_shared_experts
+        if isinstance(n_routed_experts, dict):
+            n_routed_experts = {int(k): v for k, v in n_routed_experts.items()}
         self.n_routed_experts = n_routed_experts
         self.ep_size = ep_size
         self.routed_scaling_factor = routed_scaling_factor
