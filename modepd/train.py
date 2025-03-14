@@ -204,6 +204,7 @@ def main():
         experiment_config = vars(args)
         accelerator.init_trackers("moe-pruning", experiment_config)
 
+    completed_steps = 0
     if not args.skip_train:
         #################
         # Train!
@@ -218,7 +219,6 @@ def main():
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         # Only show the progress bar once on each machine.
         progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-        completed_steps = 0
         resume_step = None
         # starting_epoch = 0
 
@@ -278,7 +278,7 @@ def main():
                 if args.with_tracking:
                     step_loss /= args.gradient_accumulation_steps
                     global_loss = accelerator.reduce(step_loss, reduction='mean')
-                    logger.info(f"completed_steps {completed_steps}: loss: {global_loss}, lr: {lr_scheduler.get_last_lr()}")
+                    # logger.info(f"completed_steps {completed_steps}: loss: {global_loss}, lr: {lr_scheduler.get_last_lr()}")
                     log_info = {"train_loss": global_loss.item(),}
                     for lr_idx, lr in enumerate(lr_scheduler.get_last_lr()):
                         log_info[f"lr_{lr_idx}"] = lr
@@ -292,16 +292,16 @@ def main():
                         output_dir = os.path.join(args.output_dir, output_dir)
                     accelerator.save_state(output_dir)
 
-                if completed_steps % args.evaluate_every == 0 or completed_steps == args.max_train_steps:
+                if completed_steps % args.evaluate_every == 0:
                     losses = []
                     for step, batch in tqdm(
-                        enumerate(validation_dataloader), desc="Evaluation",
+                        enumerate(validation_dataloader), desc=f"Evaluation at step {completed_steps}",
                         disable=not accelerator.is_local_main_process
                     ):
                         with torch.no_grad():
                             outputs = model(**batch)
-                        loss = outputs.loss.unsqueeze(0)
-                        losses.append(accelerator.reduce(loss, reduction='mean'))
+                        loss = outputs.loss.repeat(args.per_device_train_batch_size)
+                        losses.append(accelerator.gather(loss))
 
                     losses = torch.cat(losses)
                     try:
@@ -310,7 +310,7 @@ def main():
                     except OverflowError:
                         perplexity = float('inf')
                     
-                    logger.info(f"perplexity: {perplexity} eval_loss: {valid_loss}")
+                    logger.info(f"step: {completed_steps} perplexity: {perplexity} eval_loss: {valid_loss}")
                     if args.with_tracking:
                         accelerator.log(
                             {
@@ -322,6 +322,33 @@ def main():
                             
             if completed_steps >= args.max_train_steps:
                 break
+    
+    losses = []
+    for step, batch in tqdm(
+        enumerate(validation_dataloader), desc=f"Evaluation at step {completed_steps}",
+        disable=not accelerator.is_local_main_process
+    ):
+        with torch.no_grad():
+            outputs = model(**batch)
+        loss = outputs.loss.repeat(args.per_device_train_batch_size)
+        losses.append(accelerator.gather(loss))
+
+    losses = torch.cat(losses)
+    try:
+        valid_loss = torch.mean(losses)
+        perplexity = math.exp(valid_loss)
+    except OverflowError:
+        perplexity = float('inf')
+    
+    logger.info(f"step: {completed_steps} perplexity: {perplexity} eval_loss: {valid_loss}")
+    if args.with_tracking:
+        accelerator.log(
+            {
+                "perplexity": perplexity,
+                "eval_loss": valid_loss,
+            },
+            step=completed_steps
+        )
 
     alloc, max_allc, resv, max_resv = get_memory_stats()
     logger.info(
