@@ -35,8 +35,8 @@ def parse_args():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
 
     parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
-    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",) # None
-    parser.add_argument("--data_type", type=str, default="parquet")
+    parser.add_argument("--dataset_config_name", type=str, default=None,) # None
+    parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--streaming_dataset", action='store_true')
     parser.add_argument("--validation_dataset_name_or_path", type=str, default="Salesforce/wikitext")
     parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",) # None

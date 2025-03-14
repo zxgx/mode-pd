@@ -25,8 +25,8 @@ def parse_args():
 
     # build a dataset for pruning
     parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
-    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",) # None
-    parser.add_argument("--data_type", type=str, default="parquet")
+    parser.add_argument("--dataset_config_name", type=str, default=None) # None
+    parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--streaming_dataset", action='store_true')
 
     parser.add_argument("--block_size", type=int, default=4*1024,)
@@ -58,7 +58,9 @@ def main():
 
     train_dataloader = None
     if not (args.weight_prune and args.weight_prune_metric == 'norm'):
-        train_dataset = build_dataset(args, tokenizer)
+        train_dataset = build_dataset(
+            args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
+            args.data_type, args.block_size)
         data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
         train_dataloader = DataLoader(
             train_dataset,
