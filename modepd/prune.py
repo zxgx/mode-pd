@@ -34,16 +34,17 @@ def parse_args():
 
     # transformer layer pruning related arguments
     parser.add_argument("--layer_prune", action="store_true",)
+    parser.add_argument("--layer_prune_metric", type=str, default='bi', choices=['cosine', 'angular'])
     parser.add_argument("--drop_n_layers", type=int, default=13,)
 
     # MoE expert pruning related arguments
     parser.add_argument("--expert_prune", action="store_true",)
-    parser.add_argument("--expert_prune_metric", type=str, default='routing_score', choices=['routing_score', 'mc_smoe'])
+    parser.add_argument("--expert_prune_metric", type=str, default='routing_score', choices=['routing_score', 'mc_smoe', 'ours'])
     parser.add_argument("--preserve_n_experts", type=int, default=30, help="Number of experts to preserve")
 
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
-    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "wa"])
+    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "flap"])
     parser.add_argument("--preserve_channels_in_percent", type=float, default=0.7)
 
     parser.add_argument("--compressed_model_save_path", type=str, default="demo/DeepSeek-V2-Lite-Chat-Compressed",)

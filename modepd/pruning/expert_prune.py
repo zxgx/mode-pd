@@ -370,6 +370,10 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
     return new_model
 
 
+def expert_prune_by_ours(args, model, train_dataloader):
+    pass
+
+
 def expert_prune(args, model, train_dataloader):    
 
     if args.expert_prune_metric == 'routing_score':

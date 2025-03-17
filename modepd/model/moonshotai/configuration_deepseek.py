@@ -161,6 +161,7 @@ class DeepseekV3Config(PretrainedConfig):
         attention_dropout=0.0,
         routed_intermediate_sizes=None,
         shared_intermediate_sizes=None,
+        flap_intermediate_sizes=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -213,6 +214,10 @@ class DeepseekV3Config(PretrainedConfig):
             shared_intermediate_sizes = {int(k): v for k, v in shared_intermediate_sizes.items()}
         self.shared_intermediate_sizes = shared_intermediate_sizes
 
+        if flap_intermediate_sizes is not None:
+            flap_intermediate_sizes = {int(k): v for k, v in flap_intermediate_sizes.items()}
+        self.flap_intermediate_sizes = flap_intermediate_sizes
+        
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
