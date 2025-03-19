@@ -103,6 +103,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
     # Retrieves the index of the currently active GPU device
     device = torch.cuda.current_device()
 
+    handles = []
     num_layer = model.config.num_hidden_layers
     routed_intermediate_indices, shared_intermediate_indices = {}, {}
     # new config content
@@ -145,7 +146,9 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 "fluc_inp": torch.zeros(inp_dim_size, device=device),
                 "num_samples": 0
             }
-            mlp.down_proj.register_forward_hook(create_hook(module_name))
+            
+            handle = mlp.down_proj.register_forward_hook(create_hook(module_name))
+            handles.append(handle)
         elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE)):
             num_experts = len(mlp.experts)
             for e_i in range(num_experts):
@@ -156,7 +159,8 @@ def weight_prune_by_flap(args, model, train_dataloader):
                     "fluc_inp": torch.zeros(inp_dim_size, device=device),
                     "num_samples": 0
                 }
-                mlp.experts[e_i].down_proj.register_forward_hook(create_hook(module_name))
+                handle = mlp.experts[e_i].down_proj.register_forward_hook(create_hook(module_name))
+                handles.append(handle)
 
             shared_inp_dim_size = mlp.shared_experts.down_proj.weight.shape[1]
             shared_module_name = f"layers.{i}.mlp.shared_experts"
@@ -165,7 +169,8 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 "fluc_inp": torch.zeros(shared_inp_dim_size, device=device),
                 "num_samples": 0
             }
-            mlp.shared_experts.down_proj.register_forward_hook(create_hook(shared_module_name))
+            handle = mlp.shared_experts.down_proj.register_forward_hook(create_hook(shared_module_name))
+            handles.append(handle)
         else:
             raise ValueError(f"unknow mlp type: {type(mlp)} at layer {i}")
     
@@ -304,6 +309,10 @@ def weight_prune_by_flap(args, model, train_dataloader):
             # update config
             flap_intermediate_sizes[i]["shared"] = valid_channels
             shared_offset += 1
+    
+    # clear handles before saving
+    for handle in handles:
+        handle.remove()    
     
     # sanity check
     assert dense_offset == len(dense_baseline_list)

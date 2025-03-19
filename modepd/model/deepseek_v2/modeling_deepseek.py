@@ -372,7 +372,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class DeepseekV2MLP(nn.Module):
-    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
@@ -380,12 +380,18 @@ class DeepseekV2MLP(nn.Module):
             config.intermediate_size if intermediate_size is None else intermediate_size
         )
 
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=flap_bias)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.is_approx = is_approx
+        if is_approx:
+            self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=flap_bias)
+            self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if self.is_approx:
+            return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
@@ -623,12 +629,18 @@ class DeepseekV2MoE(nn.Module):
                 routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(n_routed_experts)]
             assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
             
+            is_approx = [False for _ in range(n_routed_experts)]
+            if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+                for i in range(n_routed_experts):
+                    is_approx[i] = i in config.approximate_experts[layer_idx]
+
             self.ep_size = 1
             self.experts_per_rank = n_routed_experts
             self.ep_rank = 0
             experts = [
                 DeepseekV2MLP(
-                    config, intermediate_size=routed_intermediate_sizes[i], flap_bias=flap_bias
+                    config, intermediate_size=routed_intermediate_sizes[i], 
+                    flap_bias=flap_bias, is_approx=is_approx[i]
                 )
                 for i in range(n_routed_experts)
             ]

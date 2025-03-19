@@ -159,6 +159,7 @@ class DeepseekV2Config(PretrainedConfig):
         routed_intermediate_sizes=None,
         shared_intermediate_sizes=None,
         flap_intermediate_sizes=None,
+        approximate_experts=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -215,7 +216,11 @@ class DeepseekV2Config(PretrainedConfig):
         if flap_intermediate_sizes is not None:
             flap_intermediate_sizes = {int(k): v for k, v in flap_intermediate_sizes.items()}
         self.flap_intermediate_sizes = flap_intermediate_sizes
-        
+                
+        if approximate_experts is not None:
+            approximate_experts = {int(k): v for k, v in approximate_experts.items()}
+        self.approximate_experts = approximate_experts
+
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

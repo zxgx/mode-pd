@@ -1,10 +1,14 @@
 from tqdm import tqdm
 from copy import deepcopy
+import math
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
+
+from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MLP
+from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MLP
 
 
 @torch.no_grad()
@@ -370,8 +374,141 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
     return new_model
 
 
+@torch.no_grad()
 def expert_prune_by_ours(args, model, train_dataloader):
-    pass
+    # Move the model to the GPU 
+    model.cuda()
+    # Retrieves the index of the currently active GPU device
+    device = torch.cuda.current_device()
+
+    handles = []
+    num_layers = model.config.num_hidden_layers
+    num_experts = model.config.n_routed_experts
+    hidden_size = model.config.hidden_size
+    if "deepseek_v3" in model.config.model_type:
+        approx_expert_cls = DeepseekV3MLP
+    elif "deepseek_v2" in model.config.model_type:
+        approx_expert_cls = DeepseekV2MLP
+    else:
+        raise ValueError(f"unknow model type: {model.config.model_type}")
+
+    # Identify MoE layer
+    valid_moe_layer_indices = [
+        layer_idx for layer_idx in range(num_layers) 
+        if (
+            model.config.n_routed_experts is not None and
+            layer_idx >= model.config.first_k_dense_replace and 
+            layer_idx % model.config.moe_layer_freq == 0
+        )
+    ]
+
+    bias_stats = {}
+    def create_expert_hook(expert_name):
+        def stateful_expert_hook(module, _input, _output):
+            out = _output[0]
+            batch_size = out.shape[0]
+            # bs * seq, hidden_size
+            out = out.view(-1, out.shape[-1])
+
+            # retrieve stats
+            num_samples = bias_stats[expert_name]["num_samples"]
+            baseline_out = bias_stats[expert_name]["baseline_out"]
+            fluc_out = bias_stats[expert_name]["fluc_out"]
+
+            # update moving average and fluctuation
+            baseline_out *= num_samples / (num_samples + batch_size)
+            baseline_out += torch.mean(out, dim=0) / (num_samples + batch_size)
+
+            if num_samples > 0:
+                fluc_out *= (num_samples - 1) / (num_samples + batch_size - 1)
+                fluc_out += torch.sum((out-baseline_out.unsqueeze(0))**2, dim=0) / (num_samples + batch_size)
+            
+            # write back stats
+            bias_stats[expert_name]["num_samples"] = num_samples + batch_size
+            bias_stats[expert_name]["baseline_out"] = baseline_out
+            bias_stats[expert_name]["fluc_out"] = fluc_out
+        
+        return stateful_expert_hook
+
+    routing_stats = {}
+    def create_gate_hook(layer_idx):
+        def stateful_gate_hook(module, _input, _output):
+            batch_size = _input[0].shape[0]
+
+            topk_idx, topk_weight = _output[:2]
+            assert topk_idx.dim() == 2
+
+            routing_weights = torch.zeros(
+                (topk_weight.shape[0], module.n_routed_experts),
+                device=device, dtype=topk_weight.dtype
+            )
+            routing_weights = torch.scatter(routing_weights, dim=1, index=topk_idx, src=topk_weight)
+            routing_stats[layer_idx]["scores"] += routing_weights.float().sum(0)
+            routing_stats[layer_idx]["samples"] += batch_size
+
+        return stateful_gate_hook
+
+    for i in valid_moe_layer_indices:
+        mlp = model.model.layers[i].mlp
+        routing_stats[i] = {
+            "scores": torch.zeros(mlp.gate.n_routed_experts, device=device),
+            "samples": 0
+        }
+        handle = mlp.gate.register_forward_hook(create_gate_hook(i))
+        handles.append(handle)
+        for e_idx in range(len(mlp.experts)):
+            expert_name = f"layers.{i}.experts.{e_idx}"
+            bias_stats[expert_name] = {
+                "num_samples": 0,
+                "baseline_out": torch.zeros(hidden_size, device=device),
+                "fluc_out": torch.zeros(hidden_size, device=device)
+            }
+            handle = mlp.experts[e_idx].register_forward_hook(create_expert_hook(expert_name))
+            handles.append(handle)            
+
+    data_iter = iter(train_dataloader)
+    for step in tqdm(range(args.max_steps), desc="collecting accumulated stats"):
+        batch = next(data_iter)
+        with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
+            model(**batch)
+    
+    for handle in handles:
+        handle.remove()
+    
+    metric_list = {}
+    if args.prune_using_fluctuation:
+        standarlization = lambda x: (x - torch.mean(x, axis=1, keepdim=True)) / torch.std(x, axis=1, keepdim=True)
+        pass
+    else:
+        for layer_idx in valid_moe_layer_indices:
+            routing_stats[layer_idx]["scores"] /= routing_stats[layer_idx]["samples"]
+            metric_list[layer_idx] = routing_stats[layer_idx]["scores"]
+
+    metric = torch.cat(list(metric_list.values()))
+    sorted_scores, _ = torch.sort(metric, descending=True)
+    threshold = sorted_scores[math.ceil(len(sorted_scores)*args.preserve_n_experts/num_experts)]
+
+    approximate_experts = {}
+    for layer_idx in valid_moe_layer_indices:
+        layer_metric = metric_list[layer_idx]
+        expert_mask = layer_metric > threshold
+
+        expert_indicator_list = expert_mask.tolist()
+        approximate_experts[layer_idx] = []
+        for expert_idx, is_preserved in enumerate(expert_indicator_list):
+            if not is_preserved:
+                approximate_experts[layer_idx].append(expert_idx)
+
+                expert_name = f"layers.{layer_idx}.experts.{expert_idx}"
+                new_approx_expert = approx_expert_cls(model.config, is_approx=True).to(torch.bfloat16)
+                new_approx_expert.approx_value.copy_(bias_stats[expert_name]["baseline_out"])                
+                model.model.layers[layer_idx].mlp.experts[expert_idx] = new_approx_expert
+    
+    model.config.approximate_experts = approximate_experts
+
+    model.cpu()
+    return model
 
 
 def expert_prune(args, model, train_dataloader):    
@@ -380,3 +517,5 @@ def expert_prune(args, model, train_dataloader):
         return expert_prune_by_routing_score(args, model, train_dataloader)
     elif args.expert_prune_metric == 'mc_smoe':
         return expert_prune_by_mc_smoe(args, model, train_dataloader)
+    elif args.expert_prune_metric == 'ours':
+        return expert_prune_by_ours(args, model, train_dataloader)
