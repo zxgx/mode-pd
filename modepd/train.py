@@ -205,6 +205,32 @@ def main():
         accelerator.init_trackers("moe-pruning", experiment_config)
 
     completed_steps = 0
+    resume_step = None
+    # Potentially load in the weights and states from a previous save
+    if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
+        dirs = [f.path for f in os.scandir(args.resume_from_checkpoint) if f.is_dir() and f.name.startswith("step_")]
+        if len(dirs) > 0:
+            dirs.sort(key=os.path.getctime)
+            checkpoint_path = dirs[-1]
+            path = os.path.basename(checkpoint_path)
+
+            accelerator.load_state(checkpoint_path)
+            # Extract `step_{i}`
+            training_difference = os.path.splitext(path)[0]
+
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            completed_steps = resume_step // args.gradient_accumulation_steps
+            logger.info(
+                f"Resumed from checkpoint: {checkpoint_path}, resume steps (w. grad acc): {resume_step}, "
+                f"completed_steps: {completed_steps}"
+            )
+        else:
+            logger.warning(
+                f"Please be aware that resume_from_checkpoint is specified as {args.resume_from_checkpoint}, "
+                f"but no ckpt is detected"
+            )
+
     if not args.skip_train:
         #################
         # Train!
@@ -219,33 +245,6 @@ def main():
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         # Only show the progress bar once on each machine.
         progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-        resume_step = None
-        # starting_epoch = 0
-
-        # Potentially load in the weights and states from a previous save
-        if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
-            dirs = [f.path for f in os.scandir(args.resume_from_checkpoint) if f.is_dir() and f.name.startswith("step_")]
-            if len(dirs) > 0:
-                dirs.sort(key=os.path.getctime)
-                checkpoint_path = dirs[-1]
-                path = os.path.basename(checkpoint_path)
-
-                accelerator.load_state(checkpoint_path)
-                # Extract `step_{i}`
-                training_difference = os.path.splitext(path)[0]
-
-                # need to multiply `gradient_accumulation_steps` to reflect real steps
-                resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-                completed_steps = resume_step // args.gradient_accumulation_steps
-                logger.info(
-                    f"Resumed from checkpoint: {checkpoint_path}, resume steps (w. grad acc): {resume_step}, "
-                    f"completed_steps: {completed_steps}"
-                )
-            else:
-                logger.warning(
-                    f"Please be aware that resume_from_checkpoint is specified as {args.resume_from_checkpoint}, "
-                    f"but no ckpt is detected"
-                )
 
         # update the progress_bar if load from checkpoint
         progress_bar.update(completed_steps)
