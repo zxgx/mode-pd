@@ -1,5 +1,6 @@
+#!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 export PYTHONPATH=$PWD:$PYTHONPATH
 export HF_ALLOW_CODE_EVAL="1"
 
