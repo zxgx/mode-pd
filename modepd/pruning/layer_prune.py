@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import torch
 
-from modepd.model.modeling_deepseek import DeepseekV2PreTrainedModel, DeepseekV2ForCausalLM
+from transformers import AutoModelForCausalLM
 
 @torch.no_grad()
 def layer_prune(args, model, train_dataloader):
@@ -82,16 +82,8 @@ def layer_prune(args, model, train_dataloader):
 
     preserved_layers = sorted([int(s) for s in layer_id_mapping.keys()])
 
-    if isinstance(model, DeepseekV2PreTrainedModel):
-        if hasattr(new_config, "layer_experts_idx"):  # for compatibility with Expert Drop
-            new_config.layer_experts_idx = [model.config.layer_experts_idx[i] for i in preserved_layers]
-        if isinstance(new_config.n_routed_experts, list):  # for compatibility with Expert Drop & Layer Drop
-            new_config.n_routed_experts = [model.config.n_routed_experts[i] for i in preserved_layers]
-        new_model = DeepseekV2ForCausalLM(config=new_config)
-    else:
-        raise NotImplementedError("Only DeepseekV2ForCausalLM is supported")
-
     # Model
+    new_model = AutoModelForCausalLM.from_config(config=new_config)
     new_model.load_state_dict(save_state_dict, strict=True)  # update the layer parameters
     if not hasattr(new_model, "quantization_config"):
         new_model.bfloat16()

@@ -5,10 +5,11 @@ import argparse
 import logging
 import os
 from tqdm.auto import tqdm
+import math
 
 import torch
 from torch.utils.data import DataLoader
-from accelerate import Accelerator, FullyShardedDataParallelPlugin
+from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 
@@ -19,31 +20,38 @@ from transformers import (
     get_scheduler,
 )
 
-from modepd.utils import get_memory_stats, build_dataset, init_router
-from modepd.model.modeling_deepseek import DeepseekV2ForCausalLM
-from modepd.model.tokenization_deepseek_fast import DeepseekTokenizerFast
+from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
+
 
 logger = get_logger(__name__)
-
+register_custom_model()
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--report_to", type=str, default="wandb",)
+    parser.add_argument("--report_to", type=str, default="tensorboard",)
     parser.add_argument("--output_dir", type=str, default=None,)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
-    parser.add_argument("--dataset_name", type=str, default="HuggingFaceFW/fineweb",)
-    parser.add_argument("--dataset_config_name", type=str, default="sample-350BT",)
+
+    parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
+    parser.add_argument("--dataset_config_name", type=str, default=None,) # None
+    parser.add_argument("--data_type", type=str, default=None)
+    parser.add_argument("--streaming_dataset", action='store_true')
+    parser.add_argument("--validation_dataset_name_or_path", type=str, default="Salesforce/wikitext")
+    parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",) # None
+    parser.add_argument("--evaluate_every", type=int, default=100)
+
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
+    parser.add_argument("--skip_train", action='store_true')
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
-    parser.add_argument("--learning_rate", type=float, default=2.4e-4,)
-    parser.add_argument("--lr_scheduler_type", type=str, default="linear",)
+    parser.add_argument("--learning_rate", type=float, default=4e-4,)
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
-    parser.add_argument("--checkpointing_steps", type=int, default=None,)
+    parser.add_argument("--checkpointing_steps", type=int, default=-1,)
     parser.add_argument("--with_tracking", action="store_true",)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
     parser.add_argument("--push_to_hub", action="store_true",)
@@ -67,17 +75,15 @@ def main():
         accelerator_log_kwargs["log_with"] = args.report_to
         accelerator_log_kwargs["project_dir"] = args.output_dir
 
-    fsdp_plugin = FullyShardedDataParallelPlugin(
-        sharding_strategy="FULL_SHARD",
-        activation_checkpointing=True,
-        auto_wrap_policy="transformer_based_wrap",
-        mixed_precision_policy=torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16),
-        use_orig_params=args.finetune_mod_only
-        # cpu_offload=True,
+    deepspeed_plugin = DeepSpeedPlugin(
+        gradient_clipping=1.0,
+        zero_stage=2,
+        zero3_save_16bit_model=True,
     )
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        fsdp_plugin=fsdp_plugin,
+        deepspeed_plugin=deepspeed_plugin,
+        mixed_precision="bf16",
         **accelerator_log_kwargs
     )
     
@@ -109,30 +115,13 @@ def main():
 
     #################
     # Prepare model & tokenizer
-    model_name = args.model_name_or_path
-    tokenizer = DeepseekTokenizerFast.from_pretrained(model_name)
-    model = DeepseekV2ForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, use_cache=False, attn_implementation="flash_attention_2", 
-        mod_type=args.mod_type, staged_mod_topk=args.staged_mod_topk
-    )
-    init_router(model)
-
-    if args.mod_type is not None and args.finetune_mod_only:
-        if args.mod_type == 'staged':
-            trainable_param_prefix = "mod_router"
-        elif args.mod_type == 'integrated':
-            trainable_param_prefix = "skip_router_weight"
-        for name, param in model.named_parameters():
-            if trainable_param_prefix in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+    model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
-        f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
+        f", Memory stats after initializing model: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
         main_process_only=False)
     logger.info(
         f"Model emb size: {model.get_input_embeddings().weight.shape[0]}"
@@ -142,17 +131,17 @@ def main():
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
-        assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
-    
-    train_dataset = build_dataset(args, tokenizer, logger, accelerator)
-
-    # Log a few random samples from the training set:
-    data_iter = iter(train_dataset)
-    for index in range(3):
-        sample = next(data_iter)
-        logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} sample {index}: {sample['input_ids'][:5]}", main_process_only=False)
+        model.resize_token_embeddings(len(tokenizer))
+        # assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
     
     # 3. DataLoaders creation
+    train_dataset = build_dataset(
+        args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
+        args.data_type, args.block_size, logger, accelerator)
+    validation_dataset = build_dataset(
+        args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', 
+        block_size=args.block_size, logger=logger, accelerator=accelerator)
+
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     train_dataloader = DataLoader(
         train_dataset,
@@ -160,10 +149,11 @@ def main():
         collate_fn=data_collator,
         batch_size=args.per_device_train_batch_size,
     )
-
-    for batch in train_dataloader:
-        logger.info(f"{batch['input_ids'].shape}", main_process_only=False)
-        break
+    validation_dataloader = DataLoader(
+        validation_dataset,
+        collate_fn=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        batch_size=args.per_device_train_batch_size,
+    )
 
     #################
     # Prepare optimizer and scheduler
@@ -193,116 +183,172 @@ def main():
     )
 
     # Prepare everything with `accelerator`.
-    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, lr_scheduler
+    model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
     )
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"{model}")
     logger.info(
-        f"{model}\n"
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
-        f", Memory stats: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
+        f", Memory stats before training: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
         , main_process_only=False)
     for idx, batch in enumerate(train_dataloader):
         logger.info(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}", main_process_only=False)
         if idx == 2:
             break
-    
-    # Figure out how many steps we should save the Accelerator states
-    checkpointing_steps = args.checkpointing_steps
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if args.with_tracking:
         experiment_config = vars(args)
-        accelerator.init_trackers("clm_no_trainer", experiment_config)
+        accelerator.init_trackers("moe-pruning", experiment_config)
 
-    #################
-    # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    # logger.info(f"  Num examples = {len(train_dataset)}")
-    # logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
-    starting_epoch = 0
-
+    resume_step = None
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            checkpoint_path = args.resume_from_checkpoint
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
+    if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
+        dirs = [f.path for f in os.scandir(args.resume_from_checkpoint) if f.is_dir() and f.name.startswith("step_")]
+        if len(dirs) > 0:
             dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-            checkpoint_path = path
+            checkpoint_path = dirs[-1]
             path = os.path.basename(checkpoint_path)
 
-        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
-        accelerator.load_state(checkpoint_path)
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
+            accelerator.load_state(checkpoint_path)
+            # Extract `step_{i}`
+            training_difference = os.path.splitext(path)[0]
 
-        # need to multiply `gradient_accumulation_steps` to reflect real steps
-        resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-        starting_epoch = resume_step // len(train_dataloader)
-        completed_steps = resume_step // args.gradient_accumulation_steps
-        resume_step -= starting_epoch * len(train_dataloader)
-
-    # update the progress_bar if load from checkpoint
-    progress_bar.update(completed_steps)
-
-    model.train()
-    if args.with_tracking:
-        total_loss = 0.
-    if args.resume_from_checkpoint and resume_step is not None:
-        # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-        active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
-    else:
-        active_dataloader = train_dataloader
-    for step, batch in enumerate(active_dataloader):
-        with accelerator.accumulate(model):
-            outputs = model(**batch)
-            loss = outputs.loss
-
-            if args.with_tracking:
-                total_loss += loss.detach().float()
-            accelerator.backward(loss)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
-
-        if accelerator.sync_gradients:
-            progress_bar.update(1)
-            completed_steps += 1
-        
-        if isinstance(checkpointing_steps, int) and checkpointing_steps > 0:
-            if completed_steps % checkpointing_steps == 0 and accelerator.sync_gradients:
-                output_dir = f"step_{completed_steps}"
-                if args.output_dir is not None:
-                    output_dir = os.path.join(args.output_dir, output_dir)
-                accelerator.save_state(output_dir)
-        
-        if args.with_tracking:
-            accelerator.log(
-                {
-                # "perplexity": perplexity
-                "train_loss": total_loss.item() / completed_steps,
-                # "step": completed_steps,
-                },
-                step=completed_steps,
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            completed_steps = resume_step // args.gradient_accumulation_steps
+            logger.info(
+                f"Resumed from checkpoint: {checkpoint_path}, resume steps (w. grad acc): {resume_step}, "
+                f"completed_steps: {completed_steps}"
             )
-        
-        if completed_steps >= args.max_train_steps:
-            break
+        else:
+            logger.warning(
+                f"Please be aware that resume_from_checkpoint is specified as {args.resume_from_checkpoint}, "
+                f"but no ckpt is detected"
+            )
+
+    if not args.skip_train:
+        #################
+        # Train!
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
+        logger.info("***** Running training *****")
+        # logger.info(f"  Num examples = {len(train_dataset)}")
+        # logger.info(f"  Num Epochs = {args.num_train_epochs}")
+        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
+        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(f"  Total optimization steps = {args.max_train_steps}")
+        # Only show the progress bar once on each machine.
+        progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+
+        # update the progress_bar if load from checkpoint
+        progress_bar.update(completed_steps)
+
+        model.train()
+        if args.with_tracking:
+            step_loss = torch.zeros(1, device=model.device, dtype=torch.float)
+        if args.resume_from_checkpoint and resume_step is not None:
+            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
+            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+        else:
+            active_dataloader = train_dataloader
+
+        for step, batch in enumerate(active_dataloader):
+            with accelerator.accumulate(model):
+                outputs = model(**batch)
+                loss = outputs.loss
+
+                if args.with_tracking:
+                    step_loss += loss.detach().float()
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                completed_steps += 1
+
+                if args.with_tracking:
+                    step_loss /= args.gradient_accumulation_steps
+                    global_loss = accelerator.reduce(step_loss, reduction='mean')
+                    # logger.info(f"completed_steps {completed_steps}: loss: {global_loss}, lr: {lr_scheduler.get_last_lr()}")
+                    log_info = {"train_loss": global_loss.item(),}
+                    for lr_idx, lr in enumerate(lr_scheduler.get_last_lr()):
+                        log_info[f"lr_{lr_idx}"] = lr
+                    
+                    accelerator.log(log_info, step=completed_steps)
+                    step_loss.zero_()
+
+                if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
+                    output_dir = f"step_{completed_steps}"
+                    if args.output_dir is not None:
+                        output_dir = os.path.join(args.output_dir, output_dir)
+                    accelerator.save_state(output_dir)
+
+                if completed_steps % args.evaluate_every == 0:
+                    losses = []
+                    for step, batch in tqdm(
+                        enumerate(validation_dataloader), desc=f"Evaluation at step {completed_steps}",
+                        disable=not accelerator.is_local_main_process
+                    ):
+                        with torch.no_grad():
+                            outputs = model(**batch)
+                        loss = outputs.loss.repeat(args.per_device_train_batch_size)
+                        losses.append(accelerator.gather(loss))
+
+                    losses = torch.cat(losses)
+                    try:
+                        valid_loss = torch.mean(losses)
+                        perplexity = math.exp(valid_loss)
+                    except OverflowError:
+                        perplexity = float('inf')
+                    
+                    logger.info(f"step: {completed_steps} perplexity: {perplexity} eval_loss: {valid_loss}")
+                    if args.with_tracking:
+                        accelerator.log(
+                            {
+                                "perplexity": perplexity,
+                                "eval_loss": valid_loss,
+                            },
+                            step=completed_steps
+                        )
+                            
+            if completed_steps >= args.max_train_steps:
+                break
+    
+    losses = []
+    for step, batch in tqdm(
+        enumerate(validation_dataloader), desc=f"Evaluation at step {completed_steps}",
+        disable=not accelerator.is_local_main_process
+    ):
+        with torch.no_grad():
+            outputs = model(**batch)
+        loss = outputs.loss.repeat(args.per_device_train_batch_size)
+        losses.append(accelerator.gather(loss))
+
+    losses = torch.cat(losses)
+    try:
+        valid_loss = torch.mean(losses)
+        perplexity = math.exp(valid_loss)
+    except OverflowError:
+        perplexity = float('inf')
+    
+    logger.info(f"step: {completed_steps} perplexity: {perplexity} eval_loss: {valid_loss}")
+    if args.with_tracking:
+        accelerator.log(
+            {
+                "perplexity": perplexity,
+                "eval_loss": valid_loss,
+            },
+            step=completed_steps
+        )
+
     alloc, max_allc, resv, max_resv = get_memory_stats()
     logger.info(
         f"Memory stats on exiting: Alloc: {alloc:.2f} G / {max_allc:.2f} G, Resrv: {resv:.2f} G / {max_resv:.2f} G"

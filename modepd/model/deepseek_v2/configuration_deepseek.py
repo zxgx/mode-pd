@@ -158,6 +158,8 @@ class DeepseekV2Config(PretrainedConfig):
         staged_mod_topk=2048,
         routed_intermediate_sizes=None,
         shared_intermediate_sizes=None,
+        flap_intermediate_sizes=None,
+        approximate_experts=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -168,6 +170,8 @@ class DeepseekV2Config(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.n_shared_experts = n_shared_experts
+        if isinstance(n_routed_experts, dict):
+            n_routed_experts = {int(k): v for k, v in n_routed_experts.items()}
         self.n_routed_experts = n_routed_experts
         self.ep_size = ep_size
         self.routed_scaling_factor = routed_scaling_factor
@@ -208,6 +212,14 @@ class DeepseekV2Config(PretrainedConfig):
         if shared_intermediate_sizes is not None:
             shared_intermediate_sizes = {int(k): v for k, v in shared_intermediate_sizes.items()}
         self.shared_intermediate_sizes = shared_intermediate_sizes
+
+        if flap_intermediate_sizes is not None:
+            flap_intermediate_sizes = {int(k): v for k, v in flap_intermediate_sizes.items()}
+        self.flap_intermediate_sizes = flap_intermediate_sizes
+                
+        if approximate_experts is not None:
+            approximate_experts = {int(k): v for k, v in approximate_experts.items()}
+        self.approximate_experts = approximate_experts
 
         super().__init__(
             pad_token_id=pad_token_id,

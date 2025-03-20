@@ -372,7 +372,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class DeepseekV2MLP(nn.Module):
-    def __init__(self, config, hidden_size=None, intermediate_size=None):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
@@ -380,22 +380,32 @@ class DeepseekV2MLP(nn.Module):
             config.intermediate_size if intermediate_size is None else intermediate_size
         )
 
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.is_approx = is_approx
+        if is_approx:
+            self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=flap_bias)
+            self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if self.is_approx:
+            return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
 
 class MoEGate(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.n_routed_experts = config.n_routed_experts
+        n_routed_experts = config.n_routed_experts
+        if isinstance(n_routed_experts, dict):
+            assert layer_idx is not None and layer_idx in n_routed_experts
+            n_routed_experts = n_routed_experts[layer_idx]
+        self.top_k = min(config.num_experts_per_tok, n_routed_experts)
+        self.n_routed_experts = n_routed_experts
         self.routed_scaling_factor = config.routed_scaling_factor
         self.scoring_func = config.scoring_func
         self.alpha = config.aux_loss_alpha
@@ -602,34 +612,54 @@ class DeepseekV2MoE(nn.Module):
                 ]
             )
         else:
-            if hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
-                assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes
+            n_routed_experts = config.n_routed_experts
+            if isinstance(config.n_routed_experts, dict):
+                assert layer_idx in config.n_routed_experts
+                n_routed_experts = config.n_routed_experts[layer_idx]
+
+            flap_bias = False
+            if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+                assert layer_idx is not None and layer_idx in config.flap_intermediate_sizes
+                routed_intermediate_sizes = config.flap_intermediate_sizes[layer_idx]["routed"]
+                flap_bias = True
+            elif hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
+                assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes, f"layer idx: {layer_idx} is not in config.routed_intermediate_sizes: {config.routed_intermediate_sizes}"
                 routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
-                assert len(routed_intermediate_sizes) == config.n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {config.n_routed_experts}"
             else:
-                routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(config.n_routed_experts)]
+                routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(n_routed_experts)]
+            assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
+            
+            is_approx = [False for _ in range(n_routed_experts)]
+            if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+                for i in range(n_routed_experts):
+                    is_approx[i] = i in config.approximate_experts[layer_idx]
+
             self.ep_size = 1
-            self.experts_per_rank = config.n_routed_experts
+            self.experts_per_rank = n_routed_experts
             self.ep_rank = 0
             experts = [
                 DeepseekV2MLP(
-                    config, intermediate_size=routed_intermediate_sizes[i]
+                    config, intermediate_size=routed_intermediate_sizes[i], 
+                    flap_bias=flap_bias, is_approx=is_approx[i]
                 )
-                for i in range(config.n_routed_experts)
+                for i in range(n_routed_experts)
             ]
             if self.config.mod_type == 'integrated':
                 experts.append(nn.Identity())
             self.experts = nn.ModuleList(experts)
 
-        self.gate = MoEGate(config)
+        self.gate = MoEGate(config, layer_idx)
         if config.n_shared_experts is not None:
-            if hasattr(config, "shared_intermediate_sizes") and config.shared_intermediate_sizes is not None:
+            if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+                assert layer_idx is not None and layer_idx in config.flap_intermediate_sizes
+                shared_intermediate_size = config.flap_intermediate_sizes[layer_idx]["shared"]
+            elif hasattr(config, "shared_intermediate_sizes") and config.shared_intermediate_sizes is not None:
                 assert layer_idx in config.shared_intermediate_sizes
                 shared_intermediate_size = config.shared_intermediate_sizes[layer_idx]
             else:
                 shared_intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = DeepseekV2MLP(
-                config=config, intermediate_size=shared_intermediate_size
+                config=config, intermediate_size=shared_intermediate_size, flap_bias=flap_bias
             )
 
     def forward(self, hidden_states):
@@ -1274,7 +1304,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.self_attn = ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx
         )
-
+        
+        intermediate_size = config.intermediate_size
+        flap_bias = False
+        if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+            assert layer_idx in config.flap_intermediate_sizes
+            intermediate_size = config.flap_intermediate_sizes[layer_idx]
+            flap_bias = True
         self.mlp = (
             DeepseekV2MoE(config, layer_idx)
             if (
@@ -1282,7 +1318,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0
             )
-            else DeepseekV2MLP(config)
+            else DeepseekV2MLP(config, intermediate_size=intermediate_size, flap_bias=flap_bias)
         )
         self.input_layernorm = DeepseekV2RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
