@@ -373,7 +373,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class DeepseekV3MLP(nn.Module):
-    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False, acc_tokens=0):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
@@ -384,6 +384,7 @@ class DeepseekV3MLP(nn.Module):
         self.is_approx = is_approx
         if is_approx:
             self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+            self.acc_tokens = acc_tokens
         else:
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
             self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
@@ -392,6 +393,11 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x):
         if self.is_approx:
+            assert x.dim() == 2, f"Novice is only applicable to MoNE layers"
+            if self.acc_tokens > 0:
+                self.approx_value *= self.acc_tokens / (self.acc_tokens + x.shape[0])
+                self.approx_value += torch.sum(x, dim=0) / (self.acc_tokens + x.shape[0])
+                self.acc_tokens += x.shape[0]
             return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
