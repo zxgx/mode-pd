@@ -544,25 +544,29 @@ def expert_prune_by_mone(args, model, train_dataloader):
     #################
     # Run pruning process
     approximate_experts = {}
+    approximate_expert_init_tokens = {}
     for layer_idx in valid_moe_layer_indices:
         layer_metric = metric_list[layer_idx]
         expert_mask = layer_metric > threshold[layer_idx]
 
         expert_indicator_list = expert_mask.tolist()
         approximate_experts[layer_idx] = []
+        approximate_expert_init_tokens[layer_idx] = []
         for expert_idx, is_preserved in enumerate(expert_indicator_list):
             if not is_preserved:
                 approximate_experts[layer_idx].append(expert_idx)
-
+                approximate_expert_init_tokens[layer_idx].append(
+                    bias_stats[expert_name]['num_tokens'] if args.enable_novice_evolving else 0
+                )
                 expert_name = f"layers.{layer_idx}.experts.{expert_idx}"
                 novice = novice_cls(model.config, is_approx=True, 
                     acc_tokens=bias_stats[expert_name]['num_tokens'] if args.enable_novice_evolving else 0)
                 novice.approx_value.copy_(bias_stats[expert_name]["baseline_out"])                
                 model.model.layers[layer_idx].mlp.experts[expert_idx] = novice.bfloat16()
-    
+                
     # update configs
     model.config.approximate_experts = approximate_experts
-
+    model.config.approximate_expert_init_tokens = approximate_expert_init_tokens
     model.cpu()
     return model
 

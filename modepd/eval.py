@@ -12,6 +12,8 @@ import torch
 import lm_eval
 from lm_eval.models.huggingface import HFLM
 
+from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MLP
+from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MLP
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -115,7 +117,7 @@ def main():
     lm_obj.model.generation_config.use_cache = True
     if "DeepSeek-V2" in hf_model:
         lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
-    print(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
+    logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)

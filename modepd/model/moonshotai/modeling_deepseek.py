@@ -22,6 +22,7 @@
 import math
 import warnings
 from typing import List, Optional, Tuple, Union
+from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
@@ -537,9 +538,13 @@ class DeepseekV3MoE(nn.Module):
             assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
             
             is_approx = [False for _ in range(n_routed_experts)]
+            approx_expert_init_tokens = [0 for _ in range(n_routed_experts)]
             if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+                curr_approx_expert_init_token_list = deepcopy(config.approximate_expert_init_tokens[layer_idx])
                 for i in range(n_routed_experts):
-                    is_approx[i] = i in config.approximate_experts[layer_idx]
+                    if i in config.approximate_experts[layer_idx]:
+                        is_approx[i] = True
+                        approx_expert_init_tokens[i] = curr_approx_expert_init_token_list.pop(0)
 
             self.ep_size = 1
             self.experts_per_rank = n_routed_experts
@@ -548,7 +553,7 @@ class DeepseekV3MoE(nn.Module):
                 [
                     DeepseekV3MLP(
                         config, intermediate_size=routed_intermediate_sizes[i], 
-                        flap_bias=flap_bias, is_approx=is_approx[i]
+                        flap_bias=flap_bias, is_approx=is_approx[i], acc_tokens=approx_expert_init_tokens[i]
                     )
                     for i in range(n_routed_experts)
                 ]
