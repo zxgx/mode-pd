@@ -428,7 +428,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
 
                 # update moving average and fluctuation
                 baseline_out *= num_tokens / (num_tokens + token_size)
-                baseline_out += torch.sum(out.float(), dim=0) / (num_tokens + token_size)
+                baseline_out += torch.mean(out.float(), dim=0) / (num_tokens + token_size)
                 if args.mone_ranking_metric == 'output_fluctuation':
                     if num_tokens > 0:
                         fluc_out *= (num_tokens - 1) / (num_tokens + token_size - 1)
@@ -461,19 +461,22 @@ def expert_prune_by_mone(args, model, train_dataloader):
                     (topk_weight.shape[0], module.n_routed_experts),
                     device=device, dtype=torch.float
                 )
-                num_tokens_per_expert = torch.zeros_like(routing_weights)
+                # num_tokens_per_expert = torch.zeros_like(routing_weights)
 
                 routing_weights = torch.scatter(routing_weights, dim=1, index=topk_idx, src=topk_weight)
-                num_tokens_per_expert = torch.scatter_add(num_tokens_per_expert, dim=1, index=topk_idx, src=torch.ones_like(topk_weight))
-                num_tokens_per_expert = torch.sum(num_tokens_per_expert, dim=0)
+                # num_tokens_per_expert = torch.scatter_add(num_tokens_per_expert, dim=1, index=topk_idx, src=torch.ones_like(topk_weight))
+                # num_tokens_per_expert = torch.sum(num_tokens_per_expert, dim=0)
 
                 scores = routing_stats[layer_idx]["scores"]
                 num_tokens = routing_stats[layer_idx]["num_tokens"]
                 
-                scores *= num_tokens / (num_tokens + num_tokens_per_expert)
-                scores += torch.sum(routing_weights, dim=0) / (num_tokens + num_tokens_per_expert)
+                # scores *= num_tokens / (num_tokens + num_tokens_per_expert)
+                # scores += torch.sum(routing_weights, dim=0) / (num_tokens + num_tokens_per_expert)
+                
+                scores *= num_tokens / (num_tokens + batch_size)
+                scores += torch.sum(routing_weights, dim=0) / (num_tokens + batch_size)
 
-                routing_stats[layer_idx]["num_tokens"] += num_tokens_per_expert
+                routing_stats[layer_idx]["num_tokens"] += batch_size #num_tokens_per_expert
                 routing_stats[layer_idx]["scores"] = scores
 
             return stateful_gate_hook
