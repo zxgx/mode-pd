@@ -412,7 +412,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
 
     #########################################
     # Create hooks to collect pruning metrics
-    if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation']:
+    if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion']:
         bias_stats = {}
         def create_expert_hook(expert_name):
             def stateful_expert_hook(module, _input, _output):
@@ -423,17 +423,17 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 # retrieve stats
                 num_tokens = bias_stats[expert_name]["num_tokens"]
                 baseline_out = bias_stats[expert_name]["baseline_out"]
-                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation']:
+                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation', 'fusion']:
                     fluc_out = bias_stats[expert_name]["fluc_out"]
 
                 # update moving average and fluctuation
                 baseline_out *= num_tokens / (num_tokens + token_size)
-                baseline_out += torch.mean(out.float(), dim=0) / (num_tokens + token_size)
+                baseline_out += torch.sum(out.float(), dim=0) / (num_tokens + token_size)
                 if args.mone_ranking_metric == 'output_fluctuation':
                     if num_tokens > 0:
                         fluc_out *= (num_tokens - 1) / (num_tokens + token_size - 1)
                         fluc_out += torch.sum((out - baseline_out.unsqueeze(0)).float().pow(2), dim=0) / (num_tokens + token_size)
-                elif args.mone_ranking_metric == 'io_fluctuation':
+                elif args.mone_ranking_metric in ['io_fluctuation', 'fusion']:
                     if num_tokens > 0:
                         fluc_out *= (num_tokens - 1) / (num_tokens + token_size - 1)
                         inp = _input[0]
@@ -443,19 +443,19 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 # write back stats
                 bias_stats[expert_name]["num_tokens"] += token_size
                 bias_stats[expert_name]["baseline_out"] = baseline_out
-                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation']:
+                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation', 'fusion']:
                     bias_stats[expert_name]['fluc_out'] = fluc_out
             
             return stateful_expert_hook
 
-    if args.mone_ranking_metric == 'routing_score':
+    if args.mone_ranking_metric in ['routing_score', 'fusion']:
         routing_stats = {}
         def create_gate_hook(layer_idx):
             def stateful_gate_hook(module, _input, _output):
                 batch_size = _input[0].shape[0]
                 topk_idx, topk_weight = _output[:2]
                 assert topk_idx.dim() == 2
-                token_size = topk_idx.shape[0]
+                # token_size = topk_idx.shape[0]
 
                 routing_weights = torch.zeros(
                     (topk_weight.shape[0], module.n_routed_experts),
@@ -483,25 +483,24 @@ def expert_prune_by_mone(args, model, train_dataloader):
 
     for i in valid_moe_layer_indices:
         mlp = model.model.layers[i].mlp
-        if args.mone_ranking_metric in ['routing_score']:
+        if args.mone_ranking_metric in ['routing_score', 'fusion']:
             routing_stats[i] = {
                 "scores": torch.zeros(num_experts, device=device, dtype=torch.float),
                 "num_tokens": torch.zeros(num_experts, device=device, dtype=torch.float),
             }
             
-            if args.mone_ranking_metric == 'routing_score':
-                handle = mlp.gate.register_forward_hook(create_gate_hook(i))
-                handles.append(handle)
+            handle = mlp.gate.register_forward_hook(create_gate_hook(i))
+            handles.append(handle)
             
         for e_idx in range(len(mlp.experts)):
             expert_name = f"layers.{i}.experts.{e_idx}"
-            if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation']:
+            if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion']:
                 bias_stats[expert_name] = {
                     "num_tokens": 0,
                     "baseline_out": torch.zeros(hidden_size, device=device, dtype=torch.float),
                 }
 
-                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation']:
+                if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation', 'fusion']:
                     bias_stats[expert_name]['fluc_out'] = torch.zeros(hidden_size, device=device, dtype=torch.float)
                 handle = mlp.experts[e_idx].register_forward_hook(create_expert_hook(expert_name))
                 handles.append(handle)
@@ -527,6 +526,12 @@ def expert_prune_by_mone(args, model, train_dataloader):
             fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
             output_fluc = torch.stack(fluc_list)
             metric_list[layer_idx] = torch.norm(output_fluc, dim=1)
+    elif args.mone_ranking_metric == 'fusion':
+        for layer_idx in valid_moe_layer_indices:
+            fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
+            # num_experts
+            output_fluc = torch.norm(torch.stack(fluc_list), dim=1)
+            metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) * (args.fusion_rs_weight * routing_stats[layer_idx]["scores"])
     else:
         raise ValueError(f"unknow ranking metric: {args.mone_ranking_metric}")
 
