@@ -15,6 +15,8 @@ from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2Model, Deepseek
 from modepd.model.moonshotai.configuration_deepseek import DeepseekV3Config
 from modepd.model.moonshotai.modeling_deepseek import DeepseekV3Model, DeepseekV3ForCausalLM
 from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
+from modepd.model.olmoe.configuration_olmoe import OlmoneConfig
+from modepd.model.olmoe.modeling_olmoe import OlmoneModel, OlmoneForCausalLM
 
 
 GB = 1024**3
@@ -30,16 +32,20 @@ def register_custom_model():
     AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM)
     AutoTokenizer.register(DeepseekV3Config, TikTokenTokenizer)
 
+    AutoConfig.register("olmoe_compressed", OlmoneConfig)
+    AutoModel.register(OlmoneConfig, OlmoneModel)
+    AutoModelForCausalLM.register(OlmoneConfig, OlmoneForCausalLM)
 
-def prepare_model_and_tokenizer(model_name_or_path, mode='prune', use_cache=False):
+
+def prepare_model_and_tokenizer(model_name_or_path, mode='train', use_cache=False):
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     causal_model_class = AutoModelForCausalLM
     if "DeepSeek-V2" in model_name_or_path and mode == 'prune':
         causal_model_class = DeepseekV2ForCausalLM
     elif "Moonlight-16B-A3B" in model_name_or_path and mode == 'prune':
         causal_model_class = DeepseekV3ForCausalLM
-    else:
-        raise KeyError(f"unsupport model: {model_name_or_path}")
+    elif "OLMoE" in model_name_or_path and mode == 'prune':
+        causal_model_class = OlmoneForCausalLM
     model = causal_model_class.from_pretrained(
         model_name_or_path, torch_dtype=torch.bfloat16, use_cache=use_cache, attn_implementation="flash_attention_2",
     )

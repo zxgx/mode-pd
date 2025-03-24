@@ -10,6 +10,7 @@ from transformers import AutoModelForCausalLM
 
 from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MLP
 from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MLP
+from modepd.model.olmoe.modeling_olmoe import OlmoeMLP
 
 
 @torch.no_grad()
@@ -391,32 +392,39 @@ def expert_prune_by_mone(args, model, train_dataloader):
 
     handles = []
     num_layers = model.config.num_hidden_layers
-    num_experts = model.config.n_routed_experts
     hidden_size = model.config.hidden_size
     if "deepseek_v3" in model.config.model_type:
         novice_cls = DeepseekV3MLP
+        num_experts = model.config.n_routed_experts
     elif "deepseek_v2" in model.config.model_type:
         novice_cls = DeepseekV2MLP
+        num_experts = model.config.n_routed_experts
+    elif "olmoe" in model.config.model_type:
+        novice_cls = OlmoeMLP
+        num_experts = model.config.num_experts
     else:
         raise ValueError(f"unknow model type: {model.config.model_type}")
 
     # Identify MoE layer
-    valid_moe_layer_indices = [
-        layer_idx for layer_idx in range(num_layers) 
-        if (
-            model.config.n_routed_experts is not None and
-            layer_idx >= model.config.first_k_dense_replace and 
-            layer_idx % model.config.moe_layer_freq == 0
-        )
-    ]
-
+    if "deepseek" in model.config.model_type:
+        valid_moe_layer_indices = [
+            layer_idx for layer_idx in range(num_layers) 
+            if (
+                model.config.n_routed_experts is not None and
+                layer_idx >= model.config.first_k_dense_replace and 
+                layer_idx % model.config.moe_layer_freq == 0
+            )
+        ]
+    elif "olmoe" in model.config.model_type:
+        valid_moe_layer_indices = list(range(num_layers))
+    
     #########################################
     # Create hooks to collect pruning metrics
     if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion']:
         bias_stats = {}
         def create_expert_hook(expert_name):
             def stateful_expert_hook(module, _input, _output):
-                out = _output[0]
+                out = _output
                 out = out.view(-1, out.shape[-1])
                 token_size = out.shape[0]
 
@@ -453,12 +461,18 @@ def expert_prune_by_mone(args, model, train_dataloader):
         def create_gate_hook(layer_idx):
             def stateful_gate_hook(module, _input, _output):
                 batch_size = _input[0].shape[0]
-                topk_idx, topk_weight = _output[:2]
+                if 'deepseek' in model.config.model_type:
+                    topk_idx, topk_weight = _output[:2]
+                elif 'olmoe' in model.config.model_type:
+                    router_logits = _output
+                    topk_weight = F.softmax(router_logits, dim=1, dtype=torch.float)
+                    topk_weight, topk_idx = torch.topk(topk_weight, model.config.num_experts_per_tok, dim=-1)
+
                 assert topk_idx.dim() == 2
                 # token_size = topk_idx.shape[0]
 
                 routing_weights = torch.zeros(
-                    (topk_weight.shape[0], module.n_routed_experts),
+                    (topk_weight.shape[0], num_experts),
                     device=device, dtype=torch.float
                 )
                 # num_tokens_per_expert = torch.zeros_like(routing_weights)
@@ -531,7 +545,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
             fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
             # num_experts
             output_fluc = torch.norm(torch.stack(fluc_list), dim=1)
-            metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) * (args.fusion_rs_weight * routing_stats[layer_idx]["scores"])
+            metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) * ((1-args.fusion_io_weight) * routing_stats[layer_idx]["scores"])
     else:
         raise ValueError(f"unknow ranking metric: {args.mone_ranking_metric}")
 

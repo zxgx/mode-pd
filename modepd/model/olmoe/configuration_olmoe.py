@@ -11,11 +11,11 @@
 # limitations under the License.
 """OLMoE model configuration"""
 
-from ...configuration_utils import PretrainedConfig
-from ...modeling_rope_utils import rope_config_validation
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_rope_utils import rope_config_validation
 
 
-class OlmoeConfig(PretrainedConfig):
+class OlmoneConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`OlmoeModel`]. It is used to instantiate an OLMoE
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
@@ -106,7 +106,7 @@ class OlmoeConfig(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "olmoe"
+    model_type = "olmoe_compressed"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -136,6 +136,10 @@ class OlmoeConfig(PretrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.01,
         norm_topk_prob=False,
+        routed_intermediate_sizes=None,
+        flap_intermediate_sizes=None,
+        approximate_experts=None,
+        approximate_expert_init_tokens=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -160,6 +164,9 @@ class OlmoeConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.clip_qkv = clip_qkv
         self.num_experts_per_tok = num_experts_per_tok
+        
+        if isinstance(num_experts, dict):
+            num_experts = {int(k): v for k, v in num_experts.items()}
         self.num_experts = num_experts
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
@@ -169,6 +176,20 @@ class OlmoeConfig(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
+        
+        if routed_intermediate_sizes is not None:
+            routed_intermediate_sizes = {int(k): v for k, v in routed_intermediate_sizes.items()}
+        self.routed_intermediate_sizes = routed_intermediate_sizes
+
+        if flap_intermediate_sizes is not None:
+            flap_intermediate_sizes = {int(k): v for k, v in flap_intermediate_sizes.items()}
+        self.flap_intermediate_sizes = flap_intermediate_sizes
+        
+        if approximate_experts is not None:
+            approximate_experts = {int(k): v for k, v in approximate_experts.items()}
+            approximate_expert_init_tokens = {int(k): v for k, v in approximate_expert_init_tokens.items()}
+        self.approximate_experts = approximate_experts
+        self.approximate_expert_init_tokens = approximate_expert_init_tokens
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -179,4 +200,4 @@ class OlmoeConfig(PretrainedConfig):
         )
 
 
-__all__ = ["OlmoeConfig"]
+__all__ = ["OlmoneConfig"]

@@ -13,24 +13,25 @@
 
 import math
 from typing import List, Optional, Tuple, Union
+from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_outputs import (
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.generation import GenerationMixin
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_outputs import (
     MoeCausalLMOutputWithPast,
     MoeModelOutputWithPast,
 )
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from ...modeling_utils import PreTrainedModel
-from ...pytorch_utils import ALL_LAYERNORM_LAYERS
-from ...utils import (
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
@@ -38,16 +39,16 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_olmoe import OlmoeConfig
+from .configuration_olmoe import OlmoneConfig
 
 
 if is_flash_attn_2_available():
-    from ...modeling_flash_attention_utils import _flash_attention_forward
+    from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 
 logger = logging.get_logger(__name__)
 
-_CONFIG_FOR_DOC = "OlmoeConfig"
+_CONFIG_FOR_DOC = "OlmoneConfig"
 
 
 # Copied from transformers.models.mixtral.modeling_mixtral.load_balancing_loss_func
@@ -83,54 +84,110 @@ def load_balancing_loss_func(
     if gate_logits is None or not isinstance(gate_logits, tuple):
         return 0
 
-    if isinstance(gate_logits, tuple):
-        compute_device = gate_logits[0].device
-        concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+    if isinstance(num_experts, int):
+        if isinstance(gate_logits, tuple):
+            compute_device = gate_logits[0].device
+            concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
 
-    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+        routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
 
-    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+        _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
 
-    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
 
-    if attention_mask is None:
-        # Compute the percentage of tokens routed to each experts
-        tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+        if attention_mask is None:
+            # Compute the percentage of tokens routed to each experts
+            tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
 
-        # Compute the average probability of routing to these experts
-        router_prob_per_expert = torch.mean(routing_weights, dim=0)
+            # Compute the average probability of routing to these experts
+            router_prob_per_expert = torch.mean(routing_weights, dim=0)
+        else:
+            batch_size, sequence_length = attention_mask.shape
+            num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+
+            # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
+            expert_attention_mask = (
+                attention_mask[None, :, :, None, None]
+                .expand((num_hidden_layers, batch_size, sequence_length, top_k, num_experts))
+                .reshape(-1, top_k, num_experts)
+                .to(compute_device)
+            )
+
+            # Compute the percentage of tokens routed to each experts
+            tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
+                expert_attention_mask, dim=0
+            )
+
+            # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
+            router_per_expert_attention_mask = (
+                attention_mask[None, :, :, None]
+                .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
+                .reshape(-1, num_experts)
+                .to(compute_device)
+            )
+
+            # Compute the average probability of routing to these experts
+            router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
+                router_per_expert_attention_mask, dim=0
+            )
+
+        overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
     else:
-        batch_size, sequence_length = attention_mask.shape
-        num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+        overall_loss = None
+        compute_device = gate_logits[0].device
+        for layer_idx in range(len(num_experts)):
+            _num_expert = num_experts[layer_idx]
+            _top_k = min(topk, _num_expert)
 
-        # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
-        expert_attention_mask = (
-            attention_mask[None, :, :, None, None]
-            .expand((num_hidden_layers, batch_size, sequence_length, top_k, num_experts))
-            .reshape(-1, top_k, num_experts)
-            .to(compute_device)
-        )
+            concatenated_gate_logits = layer_gate.to(compute_device)
 
-        # Compute the percentage of tokens routed to each experts
-        tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
-            expert_attention_mask, dim=0
-        )
+            routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
 
-        # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
-        router_per_expert_attention_mask = (
-            attention_mask[None, :, :, None]
-            .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
-            .reshape(-1, num_experts)
-            .to(compute_device)
-        )
+            _, selected_experts = torch.topk(routing_weights, _top_k, dim=-1)
 
-        # Compute the average probability of routing to these experts
-        router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
-            router_per_expert_attention_mask, dim=0
-        )
+            expert_mask = torch.nn.functional.one_hot(selected_experts, _num_expert)
 
-    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
-    return overall_loss * num_experts
+            if attention_mask is None:
+                # Compute the percentage of tokens routed to each experts
+                tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+                # Compute the average probability of routing to these experts
+                router_prob_per_expert = torch.mean(routing_weights, dim=0)
+            else:
+                batch_size, sequence_length = attention_mask.shape
+                num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+
+                # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
+                expert_attention_mask = (
+                    attention_mask[None, :, :, None, None]
+                    .expand((num_hidden_layers, batch_size, sequence_length, _top_k, _num_expert))
+                    .reshape(-1, _top_k, _num_expert)
+                    .to(compute_device)
+                )
+
+                # Compute the percentage of tokens routed to each experts
+                tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
+                    expert_attention_mask, dim=0
+                )
+
+                # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
+                router_per_expert_attention_mask = (
+                    attention_mask[None, :, :, None]
+                    .expand((num_hidden_layers, batch_size, sequence_length, _num_expert))
+                    .reshape(-1, _num_expert)
+                    .to(compute_device)
+                )
+
+                # Compute the average probability of routing to these experts
+                router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
+                    router_per_expert_attention_mask, dim=0
+                )
+
+            if overall_loss is None:
+                overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0)) * _num_expert
+            else:
+                overall_loss += torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0)) * _num_expert
+    return overall_loss 
 
 
 class OlmoeRMSNorm(nn.Module):
@@ -158,7 +215,7 @@ ALL_LAYERNORM_LAYERS.append(OlmoeRMSNorm)
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Olmoe
 class OlmoeRotaryEmbedding(nn.Module):
-    def __init__(self, config: OlmoeConfig, device=None):
+    def __init__(self, config: OlmoneConfig, device=None):
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
@@ -256,17 +313,30 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 # Copied from transformers.models.olmo.modeling_olmo.OlmoMLP with Olmo->Olmoe
 class OlmoeMLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, intermediate_size=None, flap_bias=False, is_approx=False, acc_tokens=0):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.intermediate_size = intermediate_size if intermediate_size is not None else config.intermediate_size
+        
+        self.is_approx = is_approx
+        if self.is_approx:
+            self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+            self.acc_tokens = acc_tokens
+        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=flap_bias)
+            self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if self.is_approx:
+            assert x.dim() == 2, f"Novice is only applicable to MoNE layers"
+            if self.acc_tokens > 0:
+                self.approx_value *= self.acc_tokens / (self.acc_tokens + x.shape[0])
+                self.approx_value += torch.sum(x, dim=0) / (self.acc_tokens + x.shape[0])
+                self.acc_tokens += x.shape[0]
+            return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
@@ -287,7 +357,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 class OlmoeAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: OlmoeConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: OlmoneConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -520,7 +590,7 @@ class OlmoeSdpaAttention(OlmoeAttention):
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
-                "OlmoeModel is using OlmoeSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
+                "OlmoneModel is using OlmoeSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
                 'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
             return super().forward(
@@ -601,13 +671,46 @@ OLMOE_ATTENTION_CLASSES = {
 
 
 class OlmoeSparseMoeBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx):
         super().__init__()
-        self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
+        n_routed_experts = config.num_experts
+        if isinstance(n_routed_experts, dict):
+            assert layer_idx in n_routed_experts
+            n_routed_experts = n_routed_experts[layer_idx]
+
+        self.num_experts = n_routed_experts
+        self.top_k = min(config.num_experts_per_tok, self.num_experts)
         self.norm_topk_prob = config.norm_topk_prob
         self.gate = nn.Linear(config.hidden_size, self.num_experts, bias=False)
-        self.experts = nn.ModuleList([OlmoeMLP(config) for _ in range(self.num_experts)])
+
+        flap_bias = False
+        if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+            assert layer_idx is not None and layer_idx in config.flap_intermediate_sizes
+            routed_intermediate_sizes = config.flap_intermediate_sizes[layer_idx]["routed"]
+            flap_bias = True
+        elif hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
+            assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes, f"layer idx: {layer_idx} is not in config.routed_intermediate_sizes: {config.routed_intermediate_sizes}"
+            routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
+        else:
+            routed_intermediate_sizes = [config.intermediate_size for _ in range(n_routed_experts)]
+        assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
+        
+        is_approx = [False for _ in range(n_routed_experts)]
+        approx_expert_init_tokens = [0 for _ in range(n_routed_experts)]
+        if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+            curr_approx_expert_init_token_list = deepcopy(config.approximate_expert_init_tokens[layer_idx])
+            for i in range(n_routed_experts):
+                if i in config.approximate_experts[layer_idx]:
+                    is_approx[i] = True
+                    approx_expert_init_tokens[i] = curr_approx_expert_init_token_list.pop(0)
+
+        self.experts = nn.ModuleList([
+            OlmoeMLP(
+                config, intermediate_size=routed_intermediate_sizes[e_idx], 
+                flap_bias=flap_bias, is_approx=is_approx[e_idx], acc_tokens=approx_expert_init_tokens[e_idx]
+            ) 
+            for e_idx in range(self.num_experts)
+        ])
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -649,13 +752,13 @@ class OlmoeSparseMoeBlock(nn.Module):
 
 
 class OlmoeDecoderLayer(nn.Module):
-    def __init__(self, config: OlmoeConfig, layer_idx: int):
+    def __init__(self, config: OlmoneConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         self.self_attn = OLMOE_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
-        self.mlp = OlmoeSparseMoeBlock(config)
+        self.mlp = OlmoeSparseMoeBlock(config, layer_idx)
         self.input_layernorm = OlmoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = OlmoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -745,7 +848,7 @@ OLMOE_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`OlmoeConfig`]):
+        config ([`OlmoneConfig`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -757,8 +860,8 @@ OLMOE_START_DOCSTRING = r"""
     OLMOE_START_DOCSTRING,
 )
 # Copied from transformers.models.llama.modeling_llama.LlamaPreTrainedModel with Llama->Olmoe
-class OlmoePreTrainedModel(PreTrainedModel):
-    config_class = OlmoeConfig
+class OlmoneForCausalLM(PreTrainedModel):
+    config_class = OlmoneConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["OlmoeDecoderLayer"]
@@ -864,15 +967,15 @@ OLMOE_INPUTS_DOCSTRING = r"""
     OLMOE_START_DOCSTRING,
 )
 # TODO: re-enable check: Copied from transformers.models.llama.modeling_llama.LlamaModel with Llama->Olmoe
-class OlmoeModel(OlmoePreTrainedModel):
+class OlmoneModel(OlmoneForCausalLM):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`OlmoeDecoderLayer`]
 
     Args:
-        config: OlmoeConfig
+        config: OlmoneConfig
     """
 
-    def __init__(self, config: OlmoeConfig):
+    def __init__(self, config: OlmoneConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1153,12 +1256,12 @@ class OlmoeModel(OlmoePreTrainedModel):
         return causal_mask
 
 
-class OlmoeForCausalLM(OlmoePreTrainedModel, GenerationMixin):
+class OlmoneForCausalLM(OlmoneForCausalLM, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = OlmoeModel(config)
+        self.model = OlmoneModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -1222,9 +1325,9 @@ class OlmoeForCausalLM(OlmoePreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, OlmoeForCausalLM
+        >>> from transformers import AutoTokenizer, OlmoneForCausalLM
 
-        >>> model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924")
+        >>> model = OlmoneForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924")
         >>> tokenizer = AutoTokenizer.from_pretrained("allenai/OLMoE-1B-7B-0924")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1296,4 +1399,4 @@ class OlmoeForCausalLM(OlmoePreTrainedModel, GenerationMixin):
         )
 
 
-__all__ = ["OlmoeForCausalLM", "OlmoeModel", "OlmoePreTrainedModel"]
+__all__ = ["OlmoneForCausalLM", "OlmoneModel", "OlmoneForCausalLM"]
