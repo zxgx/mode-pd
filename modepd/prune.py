@@ -42,8 +42,9 @@ def parse_args():
     parser.add_argument("--preserve_n_experts", type=int, default=30, help="Number of experts to preserve")
     parser.add_argument("--expert_prune_metric", type=str, default='routing_score', choices=['routing_score', 'mc_smoe', 'mone'])
     parser.add_argument("--expert_ranking_scope", type=str, default="model", choices=['model', 'layer'])
-    parser.add_argument("--mone_ranking_metric", type=str, default="routing_score", choices=['routing_score', 'fluctuation', "io_diff", "expert_token_diff"])
-    parser.add_argument("--enable_novice_evolving", action='store_ture')
+    parser.add_argument("--mone_ranking_metric", type=str, default="routing_score", choices=['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion'])
+    parser.add_argument("--enable_novice_evolving", action='store_true')
+    parser.add_argument("--fusion_io_weight", type=float, default=0.5)
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
@@ -57,7 +58,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
+    model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path, mode='prune')
     model.eval()
 
     train_dataloader = None

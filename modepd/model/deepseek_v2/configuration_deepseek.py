@@ -160,6 +160,7 @@ class DeepseekV2Config(PretrainedConfig):
         shared_intermediate_sizes=None,
         flap_intermediate_sizes=None,
         approximate_experts=None,
+        approximate_expert_init_tokens=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -219,7 +220,9 @@ class DeepseekV2Config(PretrainedConfig):
                 
         if approximate_experts is not None:
             approximate_experts = {int(k): v for k, v in approximate_experts.items()}
+            approximate_expert_init_tokens = {int(k): v for k, v in approximate_expert_init_tokens.items()}
         self.approximate_experts = approximate_experts
+        self.approximate_expert_init_tokens = approximate_expert_init_tokens
 
         super().__init__(
             pad_token_id=pad_token_id,

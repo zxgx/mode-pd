@@ -8,18 +8,18 @@ GPUS_PER_NODE=8
 
 model_id="Moonlight-16B-A3B-Instruct"
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/expert/$model_id-flap-pruned-75 $eval_config \
-    --batch_size 8 --trust_remote_code --output_dir exp/eval
+    --hf_model exp/flap/$model_id-flap-pruned-75 $eval_config \
+    --batch_size 8 --trust_remote_code --output_dir exp/flap
 
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/expert/$model_id-flap-pruned-50 $eval_config \
-    --batch_size 8 --trust_remote_code --output_dir exp/eval
+    --hf_model exp/flap/$model_id-flap-pruned-50 $eval_config \
+    --batch_size 8 --trust_remote_code --output_dir exp/flap
 
 model_id="DeepSeek-V2-Lite-Chat"
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/expert/$model_id-flap-pruned-75 $eval_config \
-    --batch_size 8 --trust_remote_code --output_dir exp/eval
+    --hf_model exp/flap/$model_id-flap-pruned-75 $eval_config \
+    --batch_size 8 --trust_remote_code --output_dir exp/flap
 
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/expert/$model_id-flap-pruned-50 $eval_config \
-    --batch_size 8 --trust_remote_code --output_dir exp/eval
+    --hf_model exp/flap/$model_id-flap-pruned-50 $eval_config \
+    --batch_size 8 --trust_remote_code --output_dir exp/flap

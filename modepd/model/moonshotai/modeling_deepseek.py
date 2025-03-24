@@ -22,6 +22,7 @@
 import math
 import warnings
 from typing import List, Optional, Tuple, Union
+from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
@@ -373,7 +374,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class DeepseekV3MLP(nn.Module):
-    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False):
+    def __init__(self, config, hidden_size=None, intermediate_size=None, flap_bias=False, is_approx=False, acc_tokens=0):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
@@ -384,6 +385,7 @@ class DeepseekV3MLP(nn.Module):
         self.is_approx = is_approx
         if is_approx:
             self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+            self.acc_tokens = acc_tokens
         else:
             self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
             self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
@@ -392,6 +394,11 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x):
         if self.is_approx:
+            assert x.dim() == 2, f"Novice is only applicable to MoNE layers"
+            if self.acc_tokens > 0:
+                self.approx_value *= self.acc_tokens / (self.acc_tokens + x.shape[0])
+                self.approx_value += torch.sum(x, dim=0) / (self.acc_tokens + x.shape[0])
+                self.acc_tokens += x.shape[0]
             return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
@@ -531,9 +538,13 @@ class DeepseekV3MoE(nn.Module):
             assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
             
             is_approx = [False for _ in range(n_routed_experts)]
+            approx_expert_init_tokens = [0 for _ in range(n_routed_experts)]
             if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+                curr_approx_expert_init_token_list = deepcopy(config.approximate_expert_init_tokens[layer_idx])
                 for i in range(n_routed_experts):
-                    is_approx[i] = i in config.approximate_experts[layer_idx]
+                    if i in config.approximate_experts[layer_idx]:
+                        is_approx[i] = True
+                        approx_expert_init_tokens[i] = curr_approx_expert_init_token_list.pop(0)
 
             self.ep_size = 1
             self.experts_per_rank = n_routed_experts
@@ -542,7 +553,7 @@ class DeepseekV3MoE(nn.Module):
                 [
                     DeepseekV3MLP(
                         config, intermediate_size=routed_intermediate_sizes[i], 
-                        flap_bias=flap_bias, is_approx=is_approx[i]
+                        flap_bias=flap_bias, is_approx=is_approx[i], acc_tokens=approx_expert_init_tokens[i]
                     )
                     for i in range(n_routed_experts)
                 ]
