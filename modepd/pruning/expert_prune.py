@@ -427,7 +427,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 out = _output
                 out = out.view(-1, out.shape[-1])
                 inp = _input[0]
-                inp = inp.view(-1, inp.shape[-1]).t() #TODO
+                inp = inp.view(-1, inp.shape[-1])
                 token_size = out.shape[0]
 
                 # retrieve stats
