@@ -25,53 +25,63 @@ def expert_prune_by_routing_score(args, model, train_dataloader):
 
     # Get MoE model info
     num_layers = model.config.num_hidden_layers
-    num_experts = model.config.n_routed_experts
+    if "deepseek" in model.config.model_type:
+        num_experts = model.config.n_routed_experts
+    elif "olmoe" in model.config.model_type:
+        num_experts = model.config.num_experts
+    else:
+        raise ValueError(f"unknow model type: {model.config.model_type}")
+    
     # Identify MoE layer
-    valid_moe_layer_indices = [
-        layer_idx for layer_idx in range(num_layers) 
-        if (
-            model.config.n_routed_experts is not None and
-            layer_idx >= model.config.first_k_dense_replace and 
-            layer_idx % model.config.moe_layer_freq == 0
-        )
-    ]
+    if "deepseek" in model.config.model_type:
+        valid_moe_layer_indices = [
+            layer_idx for layer_idx in range(num_layers) 
+            if (
+                model.config.n_routed_experts is not None and
+                layer_idx >= model.config.first_k_dense_replace and 
+                layer_idx % model.config.moe_layer_freq == 0
+            )
+        ]
+    elif "olmoe" in model.config.model_type:
+        valid_moe_layer_indices = list(range(num_layers))
     
     # Register forward hooks
     for i in valid_moe_layer_indices:
-        current_layer_num_experts = num_experts[i] if isinstance(num_experts, list) else num_experts
-        if current_layer_num_experts > args.preserve_n_experts:
-            layer = model.model.layers[i] # DeepseekV2DecoderLayer with MoE layer and number of experts > preserve_n_experts
+        layer = model.model.layers[i] # DeepseekV2DecoderLayer with MoE layer and number of experts > preserve_n_experts
 
-            def create_hook(layer_idx):
-                def stateful_hook(module, _input, _output):
-                    batch_size = _input[0].shape[0]
+        def create_hook(layer_idx):
+            def stateful_hook(module, _input, _output):
+                batch_size = _input[0].shape[0]
 
+                if 'deepseek' in model.config.model_type:
                     topk_idx, topk_weight = _output[:2]
-                    topk_idx = topk_idx.reshape(-1, topk_idx.shape[-1])  # shape(batch_size * seq_len, num_selects)
-                    topk_weight = topk_weight.reshape(-1, topk_weight.shape[-1])  # shape(batch_size * seq_len, num_selects)
+                elif 'olmoe' in model.config.model_type:
+                    router_logits = _output
+                    topk_weight = F.softmax(router_logits, dim=1, dtype=torch.float)
+                    topk_weight, topk_idx = torch.topk(topk_weight, model.config.num_experts_per_tok, dim=-1)
 
-                    routing_weights = torch.zeros(
-                        (topk_weight.shape[0], module.n_routed_experts),
-                        device=topk_weight.device,
-                        dtype=torch.float
-                    )
-                    routing_weights = torch.scatter(routing_weights, dim=1, index=topk_idx, src=topk_weight)
+                routing_weights = torch.zeros(
+                    (topk_weight.shape[0], num_experts),
+                    device=topk_weight.device,
+                    dtype=torch.float
+                )
+                routing_weights = torch.scatter(routing_weights, dim=1, index=topk_idx, src=topk_weight)
 
-                    if layer_idx not in scores:
-                        denominator[layer_idx] = batch_size
-                        scores[layer_idx] = routing_weights.float().sum(0)
-                    else:
-                        denominator[layer_idx] += batch_size
-                        scores[layer_idx] += routing_weights.float().sum(0)
+                if layer_idx not in scores:
+                    denominator[layer_idx] = batch_size
+                    scores[layer_idx] = routing_weights.float().sum(0)
+                else:
+                    denominator[layer_idx] += batch_size
+                    scores[layer_idx] += routing_weights.float().sum(0)
 
-                return stateful_hook
+            return stateful_hook
 
-            # Get MoE gate
-            moe_gate_layer = layer.mlp.gate
+        # Get MoE gate
+        moe_gate_layer = layer.mlp.gate
 
-            # register forward hook
-            handle = moe_gate_layer.register_forward_hook(create_hook(i))
-            handles.append(handle)
+        # register forward hook
+        handle = moe_gate_layer.register_forward_hook(create_hook(i))
+        handles.append(handle)
 
     # Execute model
     data_iter = iter(train_dataloader)
@@ -129,13 +139,15 @@ def expert_prune_by_routing_score(args, model, train_dataloader):
             del state_dict[f"model.layers.{layer_idx}.mlp.experts.{removed_expert_idx}.down_proj.weight"]
         # Update MoE gate weight
         state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.weight"][experts_to_keep_idx]
-        if model.config.topk_method == "noaux_tc":
+        if 'deepseek_v3' in model.config.model_type:
             state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"] = state_dict[f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"][experts_to_keep_idx]
 
     new_config = deepcopy(model.config)
-    new_config.n_routed_experts = new_routed_experts
+    if "deepseek" in model.config.model_type:
+        new_config.n_routed_experts = new_routed_experts
+    elif "olmoe" in model.config.model_type:
+        new_config.num_experts = new_routed_experts
     new_model = AutoModelForCausalLM.from_config(config=new_config)
-
     # Model
     new_model.load_state_dict(state_dict, strict=True)  # update the layer parameters
     if not hasattr(new_model, "quantization_config"):
@@ -184,16 +196,25 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
     handles = []
     # Get MoE model info
     num_layers = model.config.num_hidden_layers
-    num_experts = model.config.n_routed_experts
+    if "deepseek" in model.config.model_type:
+        num_experts = model.config.n_routed_experts
+    elif "olmoe" in model.config.model_type:
+        num_experts = model.config.num_experts
+    else:
+        raise ValueError(f"unknow model type: {model.config.model_type}")
+    
     # Identify MoE layer
-    valid_moe_layer_indices = [
-        layer_idx for layer_idx in range(num_layers) 
-        if (
-            model.config.n_routed_experts is not None and
-            layer_idx >= model.config.first_k_dense_replace and 
-            layer_idx % model.config.moe_layer_freq == 0
-        )
-    ]
+    if "deepseek" in model.config.model_type:
+        valid_moe_layer_indices = [
+            layer_idx for layer_idx in range(num_layers) 
+            if (
+                model.config.n_routed_experts is not None and
+                layer_idx >= model.config.first_k_dense_replace and 
+                layer_idx % model.config.moe_layer_freq == 0
+            )
+        ]
+    elif "olmoe" in model.config.model_type:
+        valid_moe_layer_indices = list(range(num_layers))
     
     # step 1: mlp weight permutation to align expert weight channels
     for i in tqdm(valid_moe_layer_indices, desc="Expert weight permuation"):
@@ -208,7 +229,6 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
     sim_matrix = {}
     access_frequency = {}
     for i in valid_moe_layer_indices:
-        num_experts
         layer = model.model.layers[i]
         sim_matrix[i] = torch.zeros(
             num_experts, num_experts, device=device, dtype=torch.float
@@ -234,7 +254,14 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
                         ) + 1) / 2
 
                 # compute_all_usages
-                topk_indices = _output[0].view(-1)
+                if 'deepseek' in model.config.model_type:
+                    topk_indices = _output[0].view(-1)
+                elif 'olmoe' in model.config.model_type:
+                    router_logits = _output
+                    topk_weight = F.softmax(router_logits, dim=1, dtype=torch.float)
+                    _, topk_idx = torch.topk(topk_weight, model.config.num_experts_per_tok, dim=-1)
+                    topk_indices = topk_idx.view(-1)
+                    
                 access_frequency[layer_idx].scatter_add_(0, topk_indices, torch.ones_like(topk_indices, dtype=torch.float))
                 access_frequency[layer_idx] = access_frequency[layer_idx] / torch.sum(access_frequency[layer_idx])
 
@@ -372,7 +399,10 @@ def expert_prune_by_mc_smoe(args, model, train_dataloader):
     state_dict = model.state_dict()
 
     new_config = deepcopy(model.config)
-    new_config.n_routed_experts = new_num_experts
+    if "deepseek" in model.config.model_type:
+        new_config.n_routed_experts = new_num_experts
+    elif "olmoe" in model.config.model_type:
+        new_config.num_experts = new_num_experts
     new_model = AutoModelForCausalLM.from_config(config=new_config)
 
     # Model
