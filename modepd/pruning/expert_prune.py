@@ -393,6 +393,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
     handles = []
     num_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
+    intermediate_size = model.config.moe_intermediate_size
     if "deepseek_v3" in model.config.model_type:
         novice_cls = DeepseekV3MLP
         num_experts = model.config.n_routed_experts
@@ -539,8 +540,8 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 bias_stats[expert_name] = {
                     "num_tokens": 0,
                     "baseline_out": torch.zeros(hidden_size, device=device, dtype=torch.float),
-                    "baseline_inp": torch.zeros(hidden_size, device=device, dtype=torch.float),
-                    "fluc_inp": torch.zeros(hidden_size, device=device, dtype=torch.float),
+                    "baseline_inp": torch.zeros(intermediate_size, device=device, dtype=torch.float),
+                    "fluc_inp": torch.zeros(intermediate_size, device=device, dtype=torch.float),
                 }
                 handle = mlp.experts[e_idx].down_proj.register_forward_hook(create_expert_hook(expert_name))
                 handles.append(handle)
