@@ -523,7 +523,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
             
         for e_idx in range(len(mlp.experts)):
             expert_name = f"layers.{i}.experts.{e_idx}"
-            if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion', 'token_fluctuation', 'intermediate_fluctuation']:
+            if args.mone_ranking_metric in ['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion', 'token_fluctuation']:
                 bias_stats[expert_name] = {
                     "num_tokens": 0,
                     "baseline_out": torch.zeros(hidden_size, device=device, dtype=torch.float),
