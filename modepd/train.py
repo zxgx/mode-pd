@@ -77,7 +77,7 @@ def main():
 
     deepspeed_plugin = DeepSpeedPlugin(
         gradient_clipping=1.0,
-        zero_stage=2,
+        zero_stage=0,
         zero3_save_16bit_model=True,
     )
     accelerator = Accelerator(
@@ -137,7 +137,7 @@ def main():
     # 3. DataLoaders creation
     train_dataset = build_dataset(
         args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
-        args.data_type, args.block_size, logger, accelerator)
+        args.data_type, args.block_size, logger, accelerator, seed=args.seed)
     validation_dataset = build_dataset(
         args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', 
         block_size=args.block_size, logger=logger, accelerator=accelerator)
