@@ -453,11 +453,11 @@ def expert_prune_by_mone(args, model, train_dataloader):
                         inp = inp.view(-1, inp.shape[-1])
                         fluc_out += torch.sum((inp - out).float().pow(2), dim=0) / (num_tokens + token_size)
                 elif args.mone_ranking_metric in ['token_fluctuation', 'intermediate_fluctuation']:
+                    baseline_inp *= num_tokens / (num_tokens + token_size)
+                    baseline_inp += torch.sum(inp, dim=0) / (num_tokens + token_size)
                     if num_tokens > 0:
-                        baseline_inp *= num_tokens / (num_tokens + token_size)
-                        baseline_inp += torch.sum(inp, dim=0) / (num_tokens + token_size)
                         fluc_inp *= (num_tokens - 1) / (num_tokens + token_size - 1)
-                        fluc_inp += torch.sum((inp - baseline_inp.unsqueeze(1))**2, dim=0) / (num_tokens + token_size)
+                        fluc_inp += torch.sum((inp - baseline_inp.unsqueeze(0))**2, dim=0) / (num_tokens + token_size)
                 
                 # write back stats
                 bias_stats[expert_name]["num_tokens"] += token_size
