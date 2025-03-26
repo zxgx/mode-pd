@@ -17,7 +17,7 @@ from modepd.model.moonshotai.modeling_deepseek import DeepseekV3Model, DeepseekV
 from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
 from modepd.model.olmoe.configuration_olmoe import OlmoneConfig
 from modepd.model.olmoe.modeling_olmoe import OlmoneModel, OlmoneForCausalLM
-
+from modepd.olmoe_dataset import load_olmoe_mix_dataset
 
 GB = 1024**3
 
@@ -67,27 +67,20 @@ def get_memory_stats():
 
 def build_dataset(
     dataset_name_or_path, dataset_config_name, streaming, tokenizer, split, 
-    data_type=None, block_size=4*1024, logger=None, accelerator=None,
+    data_type=None, block_size=4*1024, logger=None, accelerator=None, seed=None
 ):
     main_process_context = accelerator.main_process_first if accelerator is not None else nullcontext
 
     #################
     # Prepare dataset
-    # TODO: mix fineweb (en) and fineweb-2 (zh) dataset
-    # en = load_dataset("HuggingFaceFW/fineweb", name="sample-350BT", split="train", streaming=True)
-    # zh = load_dataset("HuggingFaceFW/fineweb-2", name="cmn_Hani", split="train", streaming=True)
-    # ds = interleave_datasets([en, zh], probabilities=[0.8, 0.2], seed=42)
-    # ds = en
     if os.path.exists(dataset_name_or_path) and data_type is not None:
         raw_dataset = load_dataset(data_type, data_dir=dataset_name_or_path, name=dataset_config_name, split=split, streaming=streaming)
     else:
-        raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
-    
-    # raw_iter = iter(raw_datasets['train'])
-    # for index in range(8):
-    #     sample = next(raw_iter)
-    #     logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} raw sample {index}: {sample['text']}", main_process_only=False)
-    
+        if "OLMoE-mix-0924" in dataset_name_or_path:
+            raw_dataset = load_olmoe_mix_dataset(os.path.join(dataset_name_or_path, "data"), streaming=streaming, seed=seed)[split]
+        else:
+            raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
+
     #################
     # Preprocessing the datasets.
     # 1. Only load text fields for the dataloader
@@ -137,17 +130,6 @@ def build_dataset(
             batched=True,
         )
 
-    # fine-web doesn't have validation set
-    # eval_dataset = lm_datasets["validation"]
-    # this logic will be handled by `accelerator.prepare`
-    # if accelerator.num_processes > 1:
-    #     train_dataset = split_dataset_by_node(train_dataset, rank=accelerator.process_index, world_size=accelerator.num_processes)
-
-    # raw_iter = iter(dataset)
-    # for index in range(4):
-    #     sample = next(raw_iter)
-    #     logger.info(f"rank: {accelerator.process_index}/{accelerator.num_processes} main sample {index}: {tokenizer.decode(sample['input_ids'])}", main_process_only=False)
-    
     return lm_dataset
 
 
