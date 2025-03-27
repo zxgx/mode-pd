@@ -45,6 +45,7 @@ def parse_args():
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
     parser.add_argument("--skip_train", action='store_true')
+    parser.add_argument("--skip_first_batches", type=int, default=None)
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
     parser.add_argument("--learning_rate", type=float, default=4e-4,)
@@ -237,8 +238,6 @@ def main():
         total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
         logger.info("***** Running training *****")
-        # logger.info(f"  Num examples = {len(train_dataset)}")
-        # logger.info(f"  Num Epochs = {args.num_train_epochs}")
         logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
         logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
         logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
@@ -255,6 +254,8 @@ def main():
         if args.resume_from_checkpoint and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+        elif args.skip_first_batches is not None:
+            active_dataloader = accelerator.skip_first_batches(train_dataloader, args.skip_first_batches)
         else:
             active_dataloader = train_dataloader
 
@@ -289,7 +290,18 @@ def main():
                     output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                    accelerator.save_state(os.path.join(output_dir, "ckpt"))
+
+                    model_dir = os.path.join(output_dir, "model")
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    unwrapped_model.save_pretrained(
+                        model_dir, is_main_process=accelerator.is_main_process, 
+                        save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
+                    )
+                    if accelerator.is_main_process:
+                        tokenizer.save_pretrained(model_dir)
+                    logger.info(f"model&ckpt is saved to {output_dir}", main_process_only=False)
+                    accelerator.wait_for_everyone()
 
                 if completed_steps % args.evaluate_every == 0:
                     losses = []
@@ -370,8 +382,6 @@ def main():
                     repo_type="model",
                     token=args.hub_token,
                 )
-            # with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            #     json.dump({"perplexity": perplexity}, f)
         logger.info(f"Saving model to {args.output_dir} done!", main_process_only=False)
         accelerator.wait_for_everyone()
     

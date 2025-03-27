@@ -104,7 +104,9 @@ def main():
             "batch_size": "auto",
             "backend": "causal",
         }
-    
+    elif "gemma-3" in hf_model:
+        model_kwargs['attn_implementation'] = 'eager'
+
     lm_eval_kwargs = {
         "limit": args.limit,
         "log_samples": False,
