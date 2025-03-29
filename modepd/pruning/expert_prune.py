@@ -617,6 +617,7 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 intermediate_score = inp_fluc * torch.sum(mlp.experts[e_idx].down_proj.weight.data.pow(2), dim=0)
                 scores.append(intermediate_score)
             metric_list[layer_idx] = torch.norm(torch.stack(scores), dim=1)
+    else:
         raise ValueError(f"unknow ranking metric: {args.mone_ranking_metric}")
 
     ###########################
