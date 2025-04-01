@@ -48,8 +48,12 @@ def parse_args():
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
-    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "flap"])
+    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "flap", "sparsegpt"])
     parser.add_argument("--preserve_channels_in_percent", type=float, default=0.7)
+    parser.add_argument("--percdamp", type=float, default=0.01)
+    parser.add_argument("--sparsegpt_block_size", type=int, default=128)
+    parser.add_argument("--sparsegpt_prunen", type=int, default=1)
+    parser.add_argument("--sparsegpt_prunem", type=int, default=4)
 
     parser.add_argument("--compressed_model_save_path", type=str, default="demo/DeepSeek-V2-Lite-Chat-Compressed",)
     return parser.parse_args()
