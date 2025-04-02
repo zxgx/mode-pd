@@ -492,5 +492,5 @@ def weight_prune(args, model, train_dataloader):
         return weight_prune_by_norm(args, model)
     elif args.weight_prune_metric == 'flap':
         return weight_prune_by_flap(args, model, train_dataloader)
-    elif args.weigth_prune_metric == 'sparsegpt':
+    elif args.weight_prune_metric == 'sparsegpt':
         return weight_prune_by_sparse_gpt(args, model, train_dataloader)
