@@ -352,7 +352,8 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
             inp = inp.view(-1, inp.shape[-1]).t()
 
             num_samples = cache[linear_name]["num_samples"]
-            H = cache[linear_name]["H"]
+            H = cache[linear_name]["H"].to(device)
+            del cache[linear_name]["H"]
 
             H *= num_samples / (num_samples + batch_size)
             inp = math.sqrt(2 / (num_samples + batch_size)) * inp.float()
@@ -360,7 +361,8 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
 
             # write back stats
             cache[linear_name]["num_samples"] = num_samples + batch_size
-            cache[linear_name]["H"] = H
+            cache[linear_name]["H"] = H.to('cpu')
+            del H
 
         return stateful_hook
     
@@ -373,7 +375,7 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
                     inp_dim_size = layer.weight.shape[1]
                     module_name = f"layers.{i}.mlp.{name}"
                     cache[module_name] = {
-                        "H": torch.zeros((inp_dim_size, inp_dim_size), device=device),
+                        "H": torch.zeros((inp_dim_size, inp_dim_size), device='cpu'),
                         "num_samples": 0
                     }
                     handle = layer.register_forward_hook(create_hook(module_name))
@@ -386,7 +388,7 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
                         inp_dim_size = layer.weight.shape[1]
                         module_name = f"layers.{i}.mlp.experts.{e_i}.{name}"
                         cache[module_name] = {
-                            "H": torch.zeros((inp_dim_size, inp_dim_size), device=device),
+                            "H": torch.zeros((inp_dim_size, inp_dim_size), device='cpu'),
                             "num_samples": 0
                         }
                         handle = layer.register_forward_hook(create_hook(module_name))
@@ -398,7 +400,7 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
                         shared_inp_dim_size = layer.weight.shape[1]
                         shared_module_name = f"layers.{i}.mlp.shared_experts.{name}"
                         cache[shared_module_name] = {
-                            "H": torch.zeros((shared_inp_dim_size, shared_inp_dim_size), device=device),
+                            "H": torch.zeros((shared_inp_dim_size, shared_inp_dim_size), device='cpu'),
                             "num_samples": 0
                         }
                         handle = layer.register_forward_hook(create_hook(shared_module_name))
@@ -422,7 +424,8 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
             if name in ['gate_proj', 'up_proj', 'down_proj']:
                 module_name = f"{module_name_prefix}.{name}"
                 W = layer.weight.data.clone().float()
-                H = cache[module_name]['H']
+                H = cache[module_name]['H'].to(device)
+                del cache[module_name]['H']
                 dead = torch.diag(H) == 0
                 H[dead, dead] = 1
                 W[:, dead] = 0
@@ -473,6 +476,7 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
 
                 # update weight# prune weight
                 layer.weight.data = W.reshape(layer.weight.shape).to(layer.weight.data.dtype)
+                del H
 
     for i in range(num_layer):
         mlp = model.model.layers[i].mlp
