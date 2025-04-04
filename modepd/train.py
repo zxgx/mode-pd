@@ -211,11 +211,11 @@ def main():
     if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
         dirs = [f.path for f in os.scandir(args.resume_from_checkpoint) if f.is_dir() and f.name.startswith("step_")]
         if len(dirs) > 0:
-            dirs.sort(key=os.path.getctime)
+            dirs.sort(key=lambda x: int(os.path.basename(x).split("_")[1]))
             checkpoint_path = dirs[-1]
             path = os.path.basename(checkpoint_path)
 
-            accelerator.load_state(checkpoint_path)
+            accelerator.load_state(os.path.join(checkpoint_path, "ckpt"))
             # Extract `step_{i}`
             training_difference = os.path.splitext(path)[0]
 
