@@ -1,11 +1,12 @@
 from copy import deepcopy
+import math
 
 import torch
 
 from transformers import AutoModelForCausalLM
 
 @torch.no_grad()
-def layer_prune(args, model, train_dataloader):
+def layer_prune_cosine(args, model, train_dataloader):
     model.cuda()
     device = torch.cuda.current_device()
     num_layers = model.config.num_hidden_layers
@@ -89,3 +90,86 @@ def layer_prune(args, model, train_dataloader):
         new_model.bfloat16()
 
     return new_model
+
+
+def layer_prune_angular(args, model, train_dataloader):
+    model.cuda()
+    device = torch.cuda.current_device()
+    num_layers = model.config.num_hidden_layers
+    cache = {}
+    handles = []
+
+    def create_hook(layer_idx):
+        def stateful_hook(module, _input, _output):
+            cache[layer_idx].append(_input[0].squeeze(0))
+        return stateful_hook
+
+    # register hooks
+    for i in range(num_layers):
+        layer = model.model.layers[i]
+        cache[i] = []    
+        handle = layer.register_forward_hook(create_hook(i))
+        handles.append(handle)
+    
+    # execute model
+    for step, batch in enumerate(train_dataloader):
+        if step == args.max_steps:
+            break
+        with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
+            model(**batch)
+       
+    # clear handles
+    for handle in handles:
+        handle.remove()
+
+    prune_metric=[]
+    for i in range(num_layers - args.drop_n_layers + 1):
+        torch.stack(cache[i])
+        torch.stack(cache[i + args.drop_n_layers])
+        similarity = torch.nn.functional.cosine_similarity(
+            torch.stack(cache[i]), 
+            torch.stack(cache[i + args.drop_n_layers]), dim=-1).float().clamp(-1.0, 1.0)
+        angular_distance = torch.acos(similarity) / math.pi
+        prune_metric.append(angular_distance.sum())
+
+    # prune the model
+    _, sorted_indices = torch.sort(torch.tensor(prune_metric), descending=False)
+    dropped_layer_list = list(range(sorted_indices[0], sorted_indices[0]+args.drop_n_layers))
+
+    reserved_layer_list = sorted(list(set(range(num_layers)) - set(dropped_layer_list)))
+    layer_id_mapping = {}
+    for new_id, reserved_old_id in enumerate(reserved_layer_list):
+        layer_id_mapping[reserved_old_id] = new_id
+
+    # save the pruned model state, this should not introduce more GPU memory usage
+    model.cpu()
+    state_dict = model.state_dict()
+    save_state_dict = {}
+    for state_name in sorted(list(state_dict.keys())):
+        for old_layer_id, new_layer_id in layer_id_mapping.items():
+            if f"layers.{old_layer_id}." in state_name:  # convert old ids to new ones
+                save_state_dict[state_name.replace(f"layers.{old_layer_id}", f"layers.{new_layer_id}")] = state_dict[state_name]
+                break
+            elif f"layers." not in state_name:  # copy other states
+                save_state_dict[state_name] = state_dict[state_name]
+                break
+
+    # update config
+    new_config = deepcopy(model.config)
+    new_config.num_hidden_layers = num_layers-args.drop_n_layers
+
+    # Model
+    new_model = AutoModelForCausalLM.from_config(config=new_config)
+    new_model.load_state_dict(save_state_dict, strict=True)  # update the layer parameters
+    if not hasattr(new_model, "quantization_config"):
+        new_model.bfloat16()
+
+    return new_model
+
+
+def layer_prune(args, model, train_dataloader):
+    if args.layer_prune_metric == 'cosine':
+        return layer_prune_cosine(args, model, train_dataloader)
+    elif args.layer_prune_metric == 'angular':
+        return layer_prune_angular(args, model, train_dataloader)
