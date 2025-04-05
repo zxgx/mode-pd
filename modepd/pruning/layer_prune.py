@@ -125,11 +125,9 @@ def layer_prune_angular(args, model, train_dataloader):
 
     prune_metric=[]
     for i in range(num_layers - args.drop_n_layers + 1):
-        torch.stack(cache[i])
-        torch.stack(cache[i + args.drop_n_layers])
         similarity = torch.nn.functional.cosine_similarity(
             torch.stack(cache[i]), 
-            torch.stack(cache[i + args.drop_n_layers]), dim=-1).float().clamp(-1.0, 1.0)
+            torch.stack(cache[i + args.drop_n_layers-1]), dim=-1).float().clamp(-1.0, 1.0)
         angular_distance = torch.acos(similarity) / math.pi
         prune_metric.append(angular_distance.sum())
 
