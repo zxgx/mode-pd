@@ -47,12 +47,12 @@ def get_args():
         default=[
             # English
             "mmlu", 
+            # Chinese
+            "cmmlu",
             # Math
             "gsm8k",
             # Code
             "humaneval",
-            # Chinese
-            "cmmlu",
             ])
     parser.add_argument(
         "--num_fewshots", type=int, nargs='+',
@@ -60,15 +60,15 @@ def get_args():
             # English
             # "mmlu",
             5,
+            # Chinese
+            # "cmmlu",
+            5,
             # Math
             # "gsm8k",
             8,
             # Code
             # "humaneval"
             0,
-            # Chinese
-            # "cmmlu",
-            5,
             ])
     parser.add_argument("--limit", type=int, default=None)
 
