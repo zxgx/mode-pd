@@ -336,8 +336,165 @@ def weight_prune_by_flap(args, model, train_dataloader):
     return model
 
 
+@torch.no_grad()
+def weight_prune_by_sparse_gpt(args, model, train_dataloader):
+    model.cuda()
+    device = torch.cuda.current_device()
+
+    handles = []
+    num_layer = model.config.num_hidden_layers
+
+    cache = {}
+    def create_hook(linear_name):
+        def stateful_hook(module, _input, _output):
+            inp = _input[0]
+            batch_size = inp.shape[0]
+            inp = inp.view(-1, inp.shape[-1]).t()
+
+            num_samples = cache[linear_name]["num_samples"]
+            H = cache[linear_name]["H"].to(device)
+            del cache[linear_name]["H"]
+
+            H *= num_samples / (num_samples + batch_size)
+            inp = math.sqrt(2 / (num_samples + batch_size)) * inp.float()
+            H += inp.matmul(inp.t())
+
+            # write back stats
+            cache[linear_name]["num_samples"] = num_samples + batch_size
+            cache[linear_name]["H"] = H.to('cpu')
+            del H
+
+        return stateful_hook
+    
+    # register hook
+    for i in range(num_layer):
+        mlp = model.model.layers[i].mlp
+        if isinstance(mlp, (DeepseekV2MLP, DeepseekV3MLP)):
+            for name, layer in mlp.named_children():
+                if name in ['gate_proj', 'up_proj', 'down_proj']:
+                    inp_dim_size = layer.weight.shape[1]
+                    module_name = f"layers.{i}.mlp.{name}"
+                    cache[module_name] = {
+                        "H": torch.zeros((inp_dim_size, inp_dim_size), device='cpu'),
+                        "num_samples": 0
+                    }
+                    handle = layer.register_forward_hook(create_hook(module_name))
+                    handles.append(handle)
+        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock)):
+            num_experts = len(mlp.experts)
+            for e_i in range(num_experts):
+                for name, layer in mlp.experts[e_i].named_children():
+                    if name in ['gate_proj', 'up_proj', 'down_proj']:
+                        inp_dim_size = layer.weight.shape[1]
+                        module_name = f"layers.{i}.mlp.experts.{e_i}.{name}"
+                        cache[module_name] = {
+                            "H": torch.zeros((inp_dim_size, inp_dim_size), device='cpu'),
+                            "num_samples": 0
+                        }
+                        handle = layer.register_forward_hook(create_hook(module_name))
+                        handles.append(handle)
+
+            if isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE)):
+                for name, layer in mlp.shared_experts.named_children():
+                    if name in ['gate_proj', 'up_proj', 'down_proj']:
+                        shared_inp_dim_size = layer.weight.shape[1]
+                        shared_module_name = f"layers.{i}.mlp.shared_experts.{name}"
+                        cache[shared_module_name] = {
+                            "H": torch.zeros((shared_inp_dim_size, shared_inp_dim_size), device='cpu'),
+                            "num_samples": 0
+                        }
+                        handle = layer.register_forward_hook(create_hook(shared_module_name))
+                        handles.append(handle)
+        else:
+            raise ValueError(f"unknow mlp type: {type(mlp)} at layer {i}")
+
+    
+    data_iter = iter(train_dataloader)
+    for step in tqdm(range(args.max_steps), desc="collecting accumulated stats"):
+        batch = next(data_iter)
+        with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
+            model(**batch)
+
+    for h in handles:
+        h.remove()
+
+    def _prune_weight(module, module_name_prefix):
+        for name, layer in module.named_children():
+            if name in ['gate_proj', 'up_proj', 'down_proj']:
+                module_name = f"{module_name_prefix}.{name}"
+                W = layer.weight.data.clone().float()
+                H = cache[module_name]['H'].to(device)
+                del cache[module_name]['H']
+                dead = torch.diag(H) == 0
+                H[dead, dead] = 1
+                W[:, dead] = 0
+
+                Losses = torch.zeros(W.shape[0], device=device)
+
+                damp = args.percdamp * torch.mean(torch.diag(H))
+                diag = torch.arange(W.shape[1], device=device)
+                H[diag, diag] += damp
+                H = torch.linalg.cholesky(H)
+                H = torch.cholesky_inverse(H)
+                H = torch.linalg.cholesky(H, upper=True)
+                Hinv = H
+
+                for i1 in range(0, W.shape[1], args.sparsegpt_block_size):
+                    i2 = min(i1 + args.sparsegpt_block_size, W.shape[1])
+                    count = i2 - i1
+
+                    W1 = W[:, i1:i2].clone()
+                    Q1 = torch.zeros_like(W1)
+                    Err1 = torch.zeros_like(W1)
+                    Losses1 = torch.zeros_like(W1)
+                    Hinv1 = Hinv[i1:i2, i1:i2]
+                    mask1 = torch.zeros_like(W1) == 1
+
+                    for i in range(count):
+                        w = W1[:, i]
+                        d = Hinv1[i, i]
+
+                        if args.sparsegpt_prunen != 0 and i % args.sparsegpt_prunem == 0:
+                            tmp = W1[:, i:(i + args.sparsegpt_prunem)] ** 2 / (torch.diag(Hinv1)[i:(i + args.sparsegpt_prunem)].reshape((1, -1))) ** 2
+                            mask1.scatter_(1, i + torch.topk(tmp, args.sparsegpt_prunen, dim=1, largest=False)[1], True)
+
+                        q = w.clone()
+                        q[mask1[:, i]] = 0
+
+                        Q1[:, i] = q
+                        Losses1[:, i] = (w - q) ** 2 / d ** 2
+
+                        err1 = (w - q) / d
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                        Err1[:, i] = err1
+
+                    W[:, i1:i2] = Q1
+                    Losses += torch.sum(Losses1, 1) / 2
+
+                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+
+                # update weight# prune weight
+                layer.weight.data = W.reshape(layer.weight.shape).to(layer.weight.data.dtype)
+                del H
+
+    for i in range(num_layer):
+        mlp = model.model.layers[i].mlp
+        if isinstance(mlp, (DeepseekV2MLP, DeepseekV3MLP)):
+            _prune_weight(module=mlp, module_name_prefix=f"layers.{i}.mlp")
+        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock)):
+            num_experts = len(mlp.experts)
+            for e_i in range(num_experts):
+                _prune_weight(module=mlp.experts[e_i], module_name_prefix=f"layers.{i}.mlp.experts.{e_i}")
+            if isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE)):
+                _prune_weight(module=mlp.shared_experts, module_name_prefix=f"layers.{i}.mlp.shared_experts")
+    model.cpu()
+    return model
+
 def weight_prune(args, model, train_dataloader):
     if args.weight_prune_metric == 'norm':
         return weight_prune_by_norm(args, model)
     elif args.weight_prune_metric == 'flap':
         return weight_prune_by_flap(args, model, train_dataloader)
+    elif args.weight_prune_metric == 'sparsegpt':
+        return weight_prune_by_sparse_gpt(args, model, train_dataloader)
