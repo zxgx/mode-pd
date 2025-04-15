@@ -49,6 +49,7 @@ def parse_args():
 
     parser.add_argument("--weight_decay", type=float, default=0.1,)
     parser.add_argument("--learning_rate", type=float, default=4e-4,)
+    parser.add_argument("--min_lr", type=float, default=None,)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
@@ -176,11 +177,13 @@ def main():
     
     # Scheduler and math around the number of training steps.
     num_update_steps_per_epoch = args.max_train_steps * accelerator.num_processes
+    scheduler_specific_kwargs = {"min_lr": args.min_lr}
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
         num_warmup_steps=args.num_warmup_steps * accelerator.num_processes,
         num_training_steps=args.max_train_steps * accelerator.num_processes,
+        scheduler_specific_kwargs=scheduler_specific_kwargs,
     )
 
     # Prepare everything with `accelerator`.

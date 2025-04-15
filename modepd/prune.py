@@ -42,14 +42,18 @@ def parse_args():
     parser.add_argument("--preserve_n_experts", type=int, default=30, help="Number of experts to preserve")
     parser.add_argument("--expert_prune_metric", type=str, default='routing_score', choices=['routing_score', 'mc_smoe', 'mone'])
     parser.add_argument("--expert_ranking_scope", type=str, default="model", choices=['model', 'layer'])
-    parser.add_argument("--mone_ranking_metric", type=str, default="routing_score", choices=['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion'])
+    parser.add_argument("--mone_ranking_metric", type=str, default="routing_score", choices=['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion', 'token_fluctuation', 'intermediate_fluctuation'])
     parser.add_argument("--enable_novice_evolving", action='store_true')
     parser.add_argument("--fusion_io_weight", type=float, default=0.5)
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
-    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "flap"])
+    parser.add_argument("--weight_prune_metric", type=str, default='norm', choices=["norm", "flap", "sparsegpt"])
     parser.add_argument("--preserve_channels_in_percent", type=float, default=0.7)
+    parser.add_argument("--percdamp", type=float, default=0.01)
+    parser.add_argument("--sparsegpt_block_size", type=int, default=128)
+    parser.add_argument("--sparsegpt_prunen", type=int, default=1)
+    parser.add_argument("--sparsegpt_prunem", type=int, default=4)
 
     parser.add_argument("--compressed_model_save_path", type=str, default="demo/DeepSeek-V2-Lite-Chat-Compressed",)
     return parser.parse_args()
