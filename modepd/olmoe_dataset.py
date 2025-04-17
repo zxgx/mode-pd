@@ -334,10 +334,10 @@ class ProportionalMixIterableDataset(IterableDataset):
         # Define source directories and their target proportions based on token counts
         source_props = {
             "dclm": 0.40,    # DCLM Baseline
-            "starcoder": 0.15,  # Starcoder
+            "starcoder": 0.15,  # 0.15, Starcoder 
             "pes2o": 0.15,    # peS2o
-            "algebraic-stack": 0.10,    # Algebraic Stack
-            "open-web-math": 0.10,     # OpenWebMath
+            "algebraic-stack": 0.10,    # 0.10, Algebraic Stack
+            "open-web-math": 0.10,     # 0.10, OpenWebMath
             "wiki": 0.10      # Wikipedia + Wikibooks
         }
         
