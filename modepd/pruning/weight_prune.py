@@ -114,7 +114,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
     def create_hook(linear_name):
         def stateful_hook(module, _input, _output):
             inp = _input[0]
-            batch_size = inp.shape[0]
+            batch_size = 1
             inp = inp.view(-1, inp.shape[-1]).t()
 
             # retrieve stats
@@ -478,7 +478,7 @@ def weight_prune_by_sparse_gpt(args, model, train_dataloader):
                 layer.weight.data = W.reshape(layer.weight.shape).to(layer.weight.data.dtype)
                 del H
 
-    for i in range(num_layer):
+    for i in tqdm(range(num_layer), desc=f"pruning layer {i}"):
         mlp = model.model.layers[i].mlp
         if isinstance(mlp, (DeepseekV2MLP, DeepseekV3MLP)):
             _prune_weight(module=mlp, module_name_prefix=f"layers.{i}.mlp")

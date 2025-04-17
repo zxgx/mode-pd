@@ -96,18 +96,23 @@ def layer_prune_angular(args, model, train_dataloader):
     model.cuda()
     device = torch.cuda.current_device()
     num_layers = model.config.num_hidden_layers
-    cache = {}
-    handles = []
+    
+    similarities = torch.zeros(num_layers - args.drop_n_layers, device=device)
+    cache, handles = [None for _ in range(num_layers)], []
 
     def create_hook(layer_idx):
         def stateful_hook(module, _input, _output):
-            cache[layer_idx].append(_input[0].squeeze(0))
+            cache[layer_idx] = _input[0].squeeze(0).float()
+            if layer_idx == num_layers - 1:
+                for i in range(num_layers - args.drop_n_layers):
+                    sim = torch.nn.functional.cosine_similarity(cache[i], cache[i+args.drop_n_layers], dim=-1)
+                    similarities[i] += torch.sum(torch.acos(sim) / math.pi)
+                    
         return stateful_hook
 
     # register hooks
     for i in range(num_layers):
         layer = model.model.layers[i]
-        cache[i] = []    
         handle = layer.register_forward_hook(create_hook(i))
         handles.append(handle)
     
@@ -118,21 +123,14 @@ def layer_prune_angular(args, model, train_dataloader):
         with torch.no_grad():
             batch = {k: v.to(device) for k, v in batch.items()}
             model(**batch)
-       
+
     # clear handles
     for handle in handles:
         handle.remove()
 
-    prune_metric=[]
-    for i in range(num_layers - args.drop_n_layers + 1):
-        similarity = torch.nn.functional.cosine_similarity(
-            torch.stack(cache[i]), 
-            torch.stack(cache[i + args.drop_n_layers-1]), dim=-1).float().clamp(-1.0, 1.0)
-        angular_distance = torch.acos(similarity) / math.pi
-        prune_metric.append(angular_distance.sum())
 
     # prune the model
-    _, sorted_indices = torch.sort(torch.tensor(prune_metric), descending=False)
+    _, sorted_indices = torch.sort(torch.tensor(similarities), descending=False)
     dropped_layer_list = list(range(sorted_indices[0], sorted_indices[0]+args.drop_n_layers))
 
     reserved_layer_list = sorted(list(set(range(num_layers)) - set(dropped_layer_list)))
