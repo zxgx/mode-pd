@@ -423,16 +423,18 @@ def expert_prune_by_mone(args, model, train_dataloader):
     handles = []
     num_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
-    intermediate_size = model.config.moe_intermediate_size
     if "deepseek_v3" in model.config.model_type:
         novice_cls = DeepseekV3MLP
         num_experts = model.config.n_routed_experts
+        intermediate_size = model.config.moe_intermediate_size
     elif "deepseek_v2" in model.config.model_type:
         novice_cls = DeepseekV2MLP
         num_experts = model.config.n_routed_experts
+        intermediate_size = model.config.moe_intermediate_size
     elif "olmoe" in model.config.model_type:
         novice_cls = OlmoeMLP
         num_experts = model.config.num_experts
+        intermediate_size = model.config.intermediate_size
     else:
         raise ValueError(f"unknow model type: {model.config.model_type}")
 
@@ -654,7 +656,9 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 expert_name = f"layers.{layer_idx}.experts.{expert_idx}"
                 novice = novice_cls(model.config, is_approx=True, 
                     acc_tokens=bias_stats[expert_name]['num_tokens'] if args.enable_novice_evolving else 0)
-                novice.approx_value.copy_(bias_stats[expert_name]["baseline_out"])                
+                novice.approx_value.copy_(
+                    torch.zeros_like(bias_stats[expert_name]["baseline_out"]) if args.zero_out_novice else bias_stats[expert_name]["baseline_out"]
+                )                
                 model.model.layers[layer_idx].mlp.experts[expert_idx] = novice.bfloat16()
                 
     # update configs

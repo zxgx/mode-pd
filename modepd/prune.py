@@ -45,6 +45,7 @@ def parse_args():
     parser.add_argument("--mone_ranking_metric", type=str, default="routing_score", choices=['routing_score', 'output_fluctuation', 'io_fluctuation', 'fusion', 'token_fluctuation', 'intermediate_fluctuation'])
     parser.add_argument("--enable_novice_evolving", action='store_true')
     parser.add_argument("--fusion_io_weight", type=float, default=0.5)
+    parser.add_argument("--zero_out_novice", action='store_true')
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
