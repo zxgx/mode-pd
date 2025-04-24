@@ -67,8 +67,9 @@ def main():
             elif task == "winogrande":
                 data_dict[task][model_id] = src['results'][task]['acc,none']
     
-    df = pd.DataFrame(data_dict)
-    df.to_csv(os.path.join(args.log_dir, "summary.csv"))
+    df = pd.DataFrame(data_dict) * 100
+    df['average'] = df.mean(axis=1)
+    df.to_csv(os.path.join(args.log_dir, f"summary-{args.log_dir.replace('/', '_')}.csv"))
 
 
 if __name__ == "__main__":

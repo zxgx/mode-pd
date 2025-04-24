@@ -117,6 +117,9 @@ def weight_prune_by_flap(args, model, train_dataloader):
             batch_size = 1
             inp = inp.view(-1, inp.shape[-1]).t()
 
+            if inp.shape[1] == 0:
+                return
+
             # retrieve stats
             num_samples = bias_stats[linear_name]["num_samples"]
             baseline_inp = bias_stats[linear_name]["baseline_inp"]
@@ -202,7 +205,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
             for e_i in range(num_experts):
                 module_name = f"layers.{i}.mlp.experts.{e_i}"
                 expert_fluc_metric_list.append(
-                    bias_stats[module_name]["fluc_inp"] * torch.sum(mlp.experts[i].down_proj.weight.data.pow(2), dim=0)
+                    bias_stats[module_name]["fluc_inp"] * torch.sum(mlp.experts[e_i].down_proj.weight.data.pow(2), dim=0)
                 )
                 expert_baseline_list.append(
                     bias_stats[module_name]["baseline_inp"]
@@ -216,7 +219,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
                     bias_stats[shared_module_name]["baseline_inp"]
                 )
     
-    standarlization = lambda x: (x - torch.mean(x, axis=1, keepdim=True)) / torch.std(x, axis=1, keepdim=True)
+    standarlization = lambda x: (x - torch.mean(x, axis=1, keepdim=True)) / (torch.std(x, axis=1, keepdim=True)+1e-8)
     ############# diff from original paper ###################
     # becuase MoE has different intermiedate size for dense layer, expert and share expert
     # the feature channels are standarlized within each group
@@ -248,7 +251,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
             valid_channels = torch.sum(weight_mask).item()
             if valid_channels == 0:
                 logging.warn(f"layer {i}'s DENSE layer should have been fully pruned. We leave one channel for the sake of compatibility")
-                weight_mask[torch.argmin(dense_fluc_metric[dense_offset])] = True
+                weight_mask[torch.argmax(dense_fluc_metric[dense_offset])] = True
                 valid_channels = 1
 
             # prune weight
@@ -278,7 +281,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 valid_channels = torch.sum(weight_mask).item()
                 if valid_channels == 0:
                     logging.warn(f"layer {i}'s expert {e_i} of the MoE layer should have been fully pruned. We leave one channel for the sake of compatibility")
-                    weight_mask[torch.argmin(expert_fluc_metric[expert_offset])] = True
+                    weight_mask[torch.argmax(expert_fluc_metric[expert_offset])] = True
                     valid_channels = 1
                 
                 # prune weight
@@ -289,6 +292,9 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 
                 # attach bias
                 output_bias = (expert_baseline_list[expert_offset] * ~weight_mask) @ mlp.experts[e_i].down_proj.weight.t().float()
+                nan_count = torch.isnan(output_bias).sum()
+                if nan_count > 0:
+                    logging.warn(f"layer {i} expert {e_i} bias has {nan_count} NaN elements, valid channels: {valid_channels}")
                 mlp.experts[e_i].down_proj.weight.data = mlp.experts[e_i].down_proj.weight.data[:, weight_mask]
                 mlp.experts[e_i].down_proj.bias = torch.nn.Parameter(output_bias.to(dtype=mlp.experts[e_i].down_proj.weight.dtype))
                 mlp.experts[e_i].down_proj.in_features = valid_channels
@@ -301,7 +307,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 valid_channels = torch.sum(weight_mask).item()
                 if valid_channels == 0:
                     logging.warn(f"layer {i}'s shared experts of the MoE layer should have been fully pruned. We leave one channel for the sake of compatibility")
-                    weight_mask[torch.argmin(shared_fluc_metric[shared_offset])] = True
+                    weight_mask[torch.argmax(shared_fluc_metric[shared_offset])] = True
                     valid_channels = 1
 
                 # prune weight
