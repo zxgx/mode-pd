@@ -4,6 +4,7 @@ Reference: https://github.com/huggingface/transformers/blob/main/examples/pytorc
 import argparse
 import logging
 import os
+import json
 from tqdm.auto import tqdm
 import math
 
@@ -30,16 +31,17 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--report_to", type=str, default="tensorboard",)
     parser.add_argument("--output_dir", type=str, default=None,)
+    parser.add_argument("--evaluate_dir", type=str, default=None, help="bypass output_dir with --skip_train")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
 
-    parser.add_argument("--dataset_name_or_path", type=str, default="HuggingFaceFW/fineweb",) # "allenai/OLMoE-mix-0924"
-    parser.add_argument("--dataset_config_name", type=str, default=None,) # None
+    parser.add_argument("--dataset_name_or_path", type=str, default="allenai/OLMoE-mix-0924",)
+    parser.add_argument("--dataset_config_name", type=str, default=None,)
     parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--streaming_dataset", action='store_true')
     parser.add_argument("--validation_dataset_name_or_path", type=str, default="Salesforce/wikitext")
-    parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",) # None
+    parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",)
     parser.add_argument("--evaluate_every", type=int, default=100)
 
     parser.add_argument("--block_size", type=int, default=4*1024,)
@@ -47,10 +49,11 @@ def parse_args():
     parser.add_argument("--skip_train", action='store_true')
     parser.add_argument("--skip_first_batches", type=int, default=None)
 
+    parser.add_argument("--zero_stage", type=int, default=0)
     parser.add_argument("--weight_decay", type=float, default=0.1,)
-    parser.add_argument("--learning_rate", type=float, default=4e-4,)
-    parser.add_argument("--min_lr", type=float, default=None,)
-    parser.add_argument("--lr_scheduler_type", type=str, default="cosine",)
+    parser.add_argument("--learning_rate", type=float, default=5e-5,)
+    parser.add_argument("--min_lr", type=float, default=5e-6,)
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine_with_min_lr",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
     parser.add_argument("--checkpointing_steps", type=int, default=-1,)
@@ -79,7 +82,7 @@ def main():
 
     deepspeed_plugin = DeepSpeedPlugin(
         gradient_clipping=1.0,
-        zero_stage=0,
+        zero_stage=args.zero_stage,
         zero3_save_16bit_model=True,
     )
     accelerator = Accelerator(
@@ -137,23 +140,25 @@ def main():
         # assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
     
     # 3. DataLoaders creation
-    train_dataset = build_dataset(
-        args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
-        args.data_type, args.block_size, logger, accelerator, seed=args.seed)
+    if not args.skip_train:
+        train_dataset = build_dataset(
+            args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
+            args.data_type, args.block_size, logger, accelerator, seed=args.seed)
     validation_dataset = build_dataset(
         args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', 
         block_size=args.block_size, logger=logger, accelerator=accelerator)
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    train_dataloader = DataLoader(
-        train_dataset,
-        # shuffle=True,
-        collate_fn=data_collator,
-        batch_size=args.per_device_train_batch_size,
-    )
+    if not args.skip_train:
+        train_dataloader = DataLoader(
+            train_dataset,
+            # shuffle=True,
+            collate_fn=data_collator,
+            batch_size=args.per_device_train_batch_size,
+        )
     validation_dataloader = DataLoader(
         validation_dataset,
-        collate_fn=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        collate_fn=data_collator,
         batch_size=args.per_device_train_batch_size,
     )
 
@@ -187,9 +192,15 @@ def main():
     )
 
     # Prepare everything with `accelerator`.
-    model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
-    )
+    if not args.skip_train:
+        model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
+        )
+    else:
+        model, optimizer, validation_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, validation_dataloader, lr_scheduler
+        )
+
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"{model}")
@@ -197,10 +208,11 @@ def main():
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
         f", Memory stats before training: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
         , main_process_only=False)
-    for idx, batch in enumerate(train_dataloader):
-        logger.info(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}", main_process_only=False)
-        if idx == 2:
-            break
+    if not args.skip_train:
+        for idx, batch in enumerate(train_dataloader):
+            logger.info(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}", main_process_only=False)
+            if idx == 2:
+                break
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -367,6 +379,13 @@ def main():
             step=completed_steps
         )
 
+    if args.evaluate_dir is not None and args.skip_train:
+        if accelerator.is_main_process:
+            with open(os.path.join(args.evaluate_dir, f"{args.model_name_or_path.replace('/', '_')}-perplexity.json"), "w") as f:
+                json.dump({
+                    "step": completed_steps, "eval_loss": valid_loss.item(), "perplexity": perplexity,
+                }, f)
+
     alloc, max_allc, resv, max_resv = get_memory_stats()
     logger.info(
         f"Memory stats on exiting: Alloc: {alloc:.2f} G / {max_allc:.2f} G, Resrv: {resv:.2f} G / {max_resv:.2f} G"
@@ -388,6 +407,8 @@ def main():
                     repo_type="model",
                     token=args.hub_token,
                 )
+            with open(os.path.join(args.output_dir, f"perplexity.json"), "w") as f:
+                json.dump({"step": completed_steps, "eval_loss": valid_loss.item(), "perplexity": perplexity,}, f)
         logger.info(f"Saving model to {args.output_dir} done!", main_process_only=False)
         accelerator.wait_for_everyone()
     

@@ -9,7 +9,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 model_id="OLMoE-1B-7B-0125"
 
 calib_size=500
-subdir=zyda-$calib_size
+subdir=zyda2-$calib_size
 
 # python modepd/prune.py --model_name_or_path /mnt/workspace/zhgeng/models/$model_id $data_config \
 #     --expert_prune --expert_prune_metric mc_smoe --preserve_n_experts 48 \

@@ -37,4 +37,4 @@ python modepd/prune.py --model_name_or_path /mnt/workspace/zhgeng/models/$model_
 
 python modepd/prune.py --model_name_or_path /mnt/workspace/zhgeng/models/$model_id $data_config \
     --weight_prune --weight_prune_metric flap --preserve_channels_in_percent 0.50 \
-    --compressed_model_save_path exp/$subdir/flap/$model_id-flap-pruned-50
+    --compressed_model_save_path exp/$subdir/flap/$model_id-flap-pruned-50 --max_steps $calib_size

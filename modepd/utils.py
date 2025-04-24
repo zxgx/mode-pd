@@ -47,7 +47,8 @@ def prepare_model_and_tokenizer(model_name_or_path, mode='train', use_cache=Fals
     elif "OLMoE" in model_name_or_path and mode == 'prune':
         causal_model_class = OlmoneForCausalLM
     model = causal_model_class.from_pretrained(
-        model_name_or_path, torch_dtype=torch.bfloat16, use_cache=use_cache, attn_implementation="flash_attention_2",
+        model_name_or_path, torch_dtype=torch.bfloat16, use_cache=use_cache, 
+        trust_remote_code=True, attn_implementation="flash_attention_2",
     )
 
     if "DeepSeek-V2" in model_name_or_path:
@@ -80,24 +81,11 @@ def build_dataset(
             raw_dataset = load_olmoe_mix_dataset(os.path.join(dataset_name_or_path, "data"), streaming=streaming, seed=seed)[split]
         else:
             raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
+    
+    # comment the following will unpack samples, which leads to larger ppl
+    if split == 'validation':
+        split = 'train'
 
-    #################
-    # Preprocessing the datasets.
-    # 1. Only load text fields for the dataloader
-    column_names = raw_dataset.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
-
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name])
-
-    with main_process_context():
-        tokenized_dataset = raw_dataset.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=column_names,
-        )
-
-    # 2. Padding to max length    
     if block_size is None:
         block_size = tokenizer.model_max_length
     else:
@@ -108,21 +96,49 @@ def build_dataset(
             )
         block_size = min(block_size, tokenizer.model_max_length)
 
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
-        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
-        total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
+    #################
+    # Preprocessing the datasets.
+    # 1. Only load text fields for the dataloader
+    column_names = raw_dataset.column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    def tokenize_function(examples):
+        if split == 'validation':
+            result = tokenizer(
+                [each for each in examples[text_column_name] if len(each) > 0], 
+                max_length=block_size, padding="max_length", truncation=True,
+            )
+            result["labels"] = result["input_ids"].copy()
+            return result
+        else:
+            return tokenizer(examples[text_column_name])
+
+    with main_process_context():
+        tokenized_dataset = raw_dataset.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=column_names,
+        )
+
+    # 2. Padding to max length    
+    if split == 'validation':
+        return tokenized_dataset
+    else:
+        # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
+        def group_texts(examples):
+            # Concatenate all texts.
+            concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+            total_length = len(concatenated_examples[list(examples.keys())[0]])
+            # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
+            # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
+            total_length = (total_length // block_size) * block_size
+            # Split by chunks of max_len.
+            result = {
+                k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+                for k, t in concatenated_examples.items()
+            }
+            result["labels"] = result["input_ids"].copy()
+            return result
 
     with main_process_context():
         lm_dataset = tokenized_dataset.map(
