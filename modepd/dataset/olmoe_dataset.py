@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import glob
 from pathlib import Path
@@ -259,8 +260,7 @@ class OLMoEExamplesIterable(ExamplesIterable):
             with open(filepath, "rb") as f:
                 dctx = zstd.ZstdDecompressor()
                 with dctx.stream_reader(f) as reader:
-                    text = reader.read().decode("utf-8")
-                    for line in text.splitlines():
+                    for line in io.TextIOWrapper(reader, encoding='utf-8'):
                         if line.strip():
                             try:
                                 example = json.loads(line)
