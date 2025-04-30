@@ -68,6 +68,24 @@ def qwen2_5_3B_param():
     return total
 
 
+def olmoe_param():
+    hidden_size = 2048
+    intermediate_size = 1024
+    num_layer = 16
+    num_experts = 64
+
+    attn = (
+        4 * hidden_size * hidden_size
+    )
+
+    mlp = num_experts * (3 * hidden_size * intermediate_size)
+
+    total = num_layer * (attn+mlp)
+    active = num_layer * (attn + mlp/8)
+    mean = num_layer * (attn + mlp/16)
+    mini = num_layer * (attn)
+    print(f"olmoe model params: {total:_}, active: {active:_}, mean: {mean:_}, mini: {mini:_}")
+
 
 def deepseek_v3_flops(batch_size, sequence_length):
     hidden_size = 2048
@@ -144,9 +162,10 @@ def calculate_flops(model_name_or_path, batch_size, sequence_length):
 
 
 if __name__ == "__main__":
-    calculate_flops("qwen2.5-3B", 1, 4096)
-    calculate_flops("moonshot/deepseek", 1, 4096)
-    print(f'{calculate_flops("qwen2.5-3B", 1, 4096)/calculate_flops("moonshot/deepseek", 1, 4096)}')
+    # calculate_flops("qwen2.5-3B", 1, 4096)
+    # calculate_flops("moonshot/deepseek", 1, 4096)
+    # print(f'{calculate_flops("qwen2.5-3B", 1, 4096)/calculate_flops("moonshot/deepseek", 1, 4096)}')
     
-    deepseek_v3_param()
-    qwen2_5_3B_param()
+    # deepseek_v3_param()
+    # qwen2_5_3B_param()
+    olmoe_param()

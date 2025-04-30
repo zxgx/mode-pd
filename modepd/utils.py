@@ -17,7 +17,7 @@ from modepd.model.moonshotai.modeling_deepseek import DeepseekV3Model, DeepseekV
 from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
 from modepd.model.olmoe.configuration_olmoe import OlmoneConfig
 from modepd.model.olmoe.modeling_olmoe import OlmoneModel, OlmoneForCausalLM
-from modepd.olmoe_dataset import load_olmoe_mix_dataset
+from modepd.dataset.olmoe_dataset import load_olmoe_mix_dataset
 
 GB = 1024**3
 

@@ -1,5 +1,4 @@
 #!/bin/bash
-#!/bin/bash
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 # export HF_ENDPOINT=https://hf-mirror.com
