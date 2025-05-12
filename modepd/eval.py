@@ -72,9 +72,10 @@ def get_args():
             0,
             ])
     parser.add_argument("--limit", type=int, default=None)
-
+    parser.add_argument("--log_samples", action='store_true')
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--stats_output_dir", type=str, default=None)
+    parser.add_argument("--analyse", action='store_true')
 
     return parser.parse_args()
 
@@ -100,7 +101,8 @@ class Analyser:
         elif "olmoe" in model.config.model_type:
             self.valid_moe_layer_indices = list(range(self.num_layers))
             self.num_experts = model.config.num_experts
-
+        else:
+            raise ValueError(f"unrecognized {model.config.model_type}")
         self.handles = []
         self.build_hooks()
 
@@ -252,7 +254,7 @@ def main():
 
     lm_eval_kwargs = {
         "limit": args.limit,
-        "log_samples": False,
+        "log_samples": args.log_samples,
         "confirm_run_unsafe_code": True,
     }
     
@@ -264,7 +266,8 @@ def main():
         lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
     logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     
-    analyser = Analyser(lm_obj.model)
+    if args.analyse:
+        analyser = Analyser(lm_obj.model)
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -282,8 +285,9 @@ def main():
             with open(os.path.join(args.output_dir, f"{hf_model.replace('/', '_')}-{task}.json"), "w") as f:
                 json.dump(results, f, default=_handle_non_serializable, indent=2)
         logging.info(pformat(results))
-        analyser.dump_stats(hf_model, task, args.stats_output_dir)
-        analyser.reset_stats()
+        if args.analyse:
+            analyser.dump_stats(hf_model, task, args.stats_output_dir)
+            analyser.reset_stats()
 
 
 if __name__ == "__main__":

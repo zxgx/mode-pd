@@ -21,6 +21,7 @@ from transformers import (
     DataCollatorForTokenClassification,
     get_scheduler,
 )
+from safetensors import SafetensorError
 
 from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
 from modepd.dataset.sft_dataset import load_sft_dataset
@@ -79,7 +80,7 @@ def parse_args():
 
 def calculate_loss(outputs, batch, model, teacher_model, distillation_temperature, distillation_alpha, batch_aggregation=True):
     # Shift so that tokens < n predict n
-    loss = outputs.loss
+    lm_loss = outputs.loss
     shift_labels = batch['labels'][..., 1:].contiguous()
     mask = shift_labels != -100
     num_valid_tokens = mask.sum()
@@ -102,12 +103,15 @@ def calculate_loss(outputs, batch, model, teacher_model, distillation_temperatur
 
         distill_loss = distill_loss * (distillation_temperature**2)
         
-        loss = (1-distillation_alpha) * loss + distillation_alpha * distill_loss
-    
+        loss = (1-distillation_alpha) * lm_loss + distillation_alpha * distill_loss
+    else:
+        loss = lm_loss
+        distill_loss = None
+
     if batch_aggregation:
         loss *= num_valid_tokens.float()
     
-    return loss
+    return loss, distill_loss
 
 
 def main():
@@ -127,12 +131,33 @@ def main():
         zero_stage=args.zero_stage,
         zero3_save_16bit_model=True,
     )
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        deepspeed_plugin=deepspeed_plugin,
-        mixed_precision="bf16",
-        **accelerator_log_kwargs
-    )
+    if args.distillation:
+        inference_plugin = DeepSpeedPlugin(
+            hf_ds_config={
+                "bf16": {
+                    "enabled": True
+                },
+                "zero_optimization": {
+                    "stage": 0,
+                    "overlap_comm": True,
+                },
+                "train_micro_batch_size_per_gpu": 1
+            }
+        )
+        deepspeed_plugins = {"student": deepspeed_plugin, "teacher": inference_plugin}
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            mixed_precision="bf16",
+            deepspeed_plugins=deepspeed_plugins,
+            **accelerator_log_kwargs
+        )
+    else:
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            deepspeed_plugin=deepspeed_plugin,
+            mixed_precision="bf16",
+            **accelerator_log_kwargs
+        )
     
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -263,14 +288,15 @@ def main():
     )
 
     # Prepare everything with `accelerator`.
+    model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
+    )
     if args.distillation:
-        model, teacher_model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
-            model, teacher_model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
-        )
-    else:
-        model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
-            model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
-        )
+        accelerator.state.select_deepspeed_plugin("teacher")
+        teacher_model = accelerator.prepare(teacher_model)
+        accelerator.state.select_deepspeed_plugin("student")
+        teacher_model.eval()
+    logger.info(f"optimizer type: {type(optimizer)}", main_process_only=False)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -281,7 +307,7 @@ def main():
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"{model}")
+    # logger.info(f"{model}")
     logger.info(
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
         f", Memory stats before training: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
@@ -354,7 +380,7 @@ def main():
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 # loss = outputs.loss
-                loss = calculate_loss(
+                loss, distill_loss = calculate_loss(
                     outputs, batch, model, teacher_model, args.distillation_temperature, 
                     args.distillation_alpha, not args.disable_batch_aggregation
                 )
@@ -385,17 +411,20 @@ def main():
                     output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(os.path.join(output_dir, "ckpt"))
+                    # accelerator.save_state(os.path.join(output_dir, "ckpt"))
 
-                    model_dir = os.path.join(output_dir, "model")
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    unwrapped_model.save_pretrained(
-                        model_dir, is_main_process=accelerator.is_main_process, 
-                        save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
-                    )
-                    if accelerator.is_main_process:
-                        tokenizer.save_pretrained(model_dir)
-                    logger.info(f"model&ckpt is saved to {output_dir}", main_process_only=False)
+                    try:
+                        model_dir = os.path.join(output_dir, "model")
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        unwrapped_model.save_pretrained(
+                            model_dir, is_main_process=accelerator.is_main_process, 
+                            save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
+                        )
+                        if accelerator.is_main_process:
+                            tokenizer.save_pretrained(model_dir)
+                        logger.info(f"model&ckpt is saved to {output_dir}", main_process_only=False)
+                    except SafetensorError as e:
+                        logger.warning(f"rank {accelerator.process_index} at step {step} fails in saving model.", main_process_only=False)
                     accelerator.wait_for_everyone()
 
                 if completed_steps % args.evaluate_every == 0:
