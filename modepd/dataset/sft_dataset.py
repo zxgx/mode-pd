@@ -108,10 +108,67 @@ def build_sft_dataset(
             remove_columns=raw_dataset.column_names,
         )
 
+
+def build_custom_sft_dataset(
+    raw_dataset, 
+    tokenizer, 
+    block_size=4*1024, 
+    logger=None,
+    context_manager=None,
+):
+    # Ensure block_size is within tokenizer's limit
+    if block_size is None:
+        block_size = tokenizer.model_max_length
+    else:
+        if block_size > tokenizer.model_max_length and logger is not None:
+            logger.warning(
+                f"The block_size passed ({block_size}) is larger than the maximum length for the model "
+                f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
+            )
+        block_size = min(block_size, tokenizer.model_max_length)
+
+    def tokenize_and_mask_function(examples):
+        """
+        Tokenize conversations and create loss masks for assistant responses only.
+        
+        This processes each conversation to ensure loss is only calculated on assistant messages.
+        """
+        # Process each conversation
+        all_input_ids = []
+        all_attention_mask = []
+        all_labels = []
+        
+        # Iterate through each example
+        for each in examples["text"]:
+            outputs = tokenizer(each)
+
+            input_ids = outputs['input_ids']
+            attention_mask = outputs['attention_mask']
+            labels = input_ids.copy()
+            # Append to batch lists
+            all_input_ids.append(input_ids)
+            all_attention_mask.append(attention_mask)
+            all_labels.append(labels)
+        
+        return {
+            "input_ids": all_input_ids,
+            "attention_mask": all_attention_mask,
+            "labels": all_labels
+        }
+    
+    with context_manager():
+        # Process the dataset directly without concatenation
+        return raw_dataset.map(
+            tokenize_and_mask_function,
+            batched=True,
+            remove_columns=raw_dataset.column_names,
+        )
+
 def load_sft_dataset(
     dataset_name_or_path,
     tokenizer,
     split='train',
+    data_type=None,
     block_size=4*1024,
     logger=None,
     accelerator=None,
@@ -139,21 +196,25 @@ def load_sft_dataset(
         return load_from_disk(cache_path)
     
     logger.info(f"Loading SFT dataset from: {dataset_name_or_path})")
-    
-    # Set random seed if provided
-    if seed is not None:
-        random.seed(seed)
-    
-    raw_dataset = load_dataset(dataset_name_or_path)
-
+        
     # Create a context manager for distributed processing
     if accelerator is not None:
         context_manager = accelerator.main_process_first
     else:
         context_manager = nullcontext
     
+    # Set random seed if provided
+    if seed is not None:
+        random.seed(seed)
+
+    if data_type is None:
+        raw_dataset = load_dataset(dataset_name_or_path)
+        sft_dataset_builder = build_sft_dataset
+    else:
+        raw_dataset = load_dataset(data_type, data_files=dataset_name_or_path)
+        sft_dataset_builder = build_custom_sft_dataset
     # Build the SFT dataset
-    processed_dataset = build_sft_dataset(
+    processed_dataset = sft_dataset_builder(
         raw_dataset[split],
         tokenizer, 
         block_size=block_size,

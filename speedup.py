@@ -51,10 +51,17 @@ def main():
         "arc_challenge", "arc_easy", "boolq", "copa", "mmlu", 
         "openbookqa", "piqa", "rte", "winogrande"
     ]
+    # task_keys = [
+    #     "arc_challenge", "arc_easy", "boolq", "copa", #"mmlu", 
+    #     "openbookqa", "piqa", "rte", "winogrande"
+    # ]
 
     results = {}
     total_throughput = []
     for task in task_keys:
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        init_mem = torch.cuda.max_memory_allocated()
         if task == 'arc_challenge' or task == 'arc_easy':
             path = f"exp/samples/_mnt_videodata_zhgeng_models_Qwen2.5-0.5B-ai2_arc.json"
         else:
@@ -63,8 +70,8 @@ def main():
         with open(path) as f:
             data = json.load(f)
         if task == "mmlu":
-            for key in data['samples']:
-                for idx, sample in tqdm(enumerate(data['samples'][key])):
+            for key in tqdm(data['samples']):
+                for idx, sample in enumerate(data['samples'][key]):
                     if args.limit is not None and idx == args.limit:
                         break
                     input_text = sample["arguments"][0][0]
@@ -78,11 +85,22 @@ def main():
 
                     torch.cuda.synchronize()
                     end = time.time()
-
                     prefill_time = end - start
-                    throughput = prefill_len / prefill_time
+
+                    outputs = model.generate(**inputs, max_new_tokens=256, do_sample=False, eos_token_id=None)
+                    # print(f"prefill len: {prefill_len} output: {outputs.shape}")
+                    torch.cuda.synchronize()
+                    generation_time = time.time() - end - prefill_time
+
+                    prefill_throughput = prefill_len / prefill_time
+                    throughput = 256 / generation_time
                     throughput_list.append(throughput)
                     total_throughput.append(throughput)
+                    # print(f"task: {task} sample: {idx} prefill time {prefill_time:.2f}, throughput: {prefill_throughput:.2f}, "
+                    #     f"generation time {generation_time:.2f}, throughput: {throughput:.2f}")
+
+                # only evalate one task
+                break
         else:
             for idx, sample in tqdm(enumerate(data['samples'][task])):
                 if args.limit is not None and idx == args.limit:
@@ -98,23 +116,34 @@ def main():
 
                 torch.cuda.synchronize()
                 end = time.time()
-
                 prefill_time = end - start
-                throughput = prefill_len / prefill_time
+
+                outputs = model.generate(**inputs, max_new_tokens=256, do_sample=False, eos_token_id=None)
+                # print(f"prefill len: {prefill_len} output: {outputs.shape}")
+                torch.cuda.synchronize()
+                generation_time = time.time() - end - prefill_time
+
+                prefill_throughput = prefill_len / prefill_time
+                throughput = 256 / generation_time
                 throughput_list.append(throughput)
                 total_throughput.append(throughput)
-        # print(f"prefill_len: {prefill_len}, prefill time: {prefill_time:.2f}, throughput: {prefill_len / prefill_time:.2f}")
-
+                # print(f"task: {task} sample: {idx} prefill time {prefill_time:.2f}, throughput: {prefill_throughput:.2f}, "
+                #     f"generation time {generation_time:.2f}, throughput: {throughput:.2f}")
+        
+        final_mem = torch.cuda.max_memory_allocated()
         results[task] = {
             "mean": np.mean(throughput_list),
-            "std": np.std(throughput_list)
+            "std": np.std(throughput_list),
+            "peak mem": final_mem/1024**3,
+            "act mem": (final_mem - init_mem)/1024**3
         }
-        print(f"throughput for task: {task}: {np.mean(throughput_list):.2f} +- {np.std(throughput_list):.2f}")
+        print(f"throughput for task: {task}: {np.mean(throughput_list):.2f} +- {np.std(throughput_list):.2f}, memory init: {init_mem/1024**3:.2f}, final: {final_mem/1024**3:.2f}, cost: {(final_mem - init_mem)/1024**3:.2f}")
     
     results['total'] = {
         "mean": np.mean(total_throughput),
         "std": np.std(total_throughput)
     }
+    print(f"total throughput {np.mean(total_throughput):.2f} +- {np.std(total_throughput):.2f}")
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
         with open(os.path.join(args.output_dir, f"{args.model_name_or_path.replace('/', '_')}.json"), "w") as f:

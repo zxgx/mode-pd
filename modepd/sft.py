@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
 
     parser.add_argument("--dataset_name_or_path", type=str, default="allenai/OLMoE-mix-0924",)
+    parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--evaluate_every", type=int, default=100)
 
     parser.add_argument("--block_size", type=int, default=4*1024,)
@@ -218,7 +219,7 @@ def main():
     # 3. DataLoaders creation
     # Load training dataset
     full_train_dataset = load_sft_dataset(
-        args.dataset_name_or_path, tokenizer, 'train',
+        args.dataset_name_or_path, tokenizer, 'train', data_type=args.data_type,
         block_size=args.block_size, logger=logger, accelerator=accelerator,
         seed=args.seed, cache_path=args.sft_cache_path
     )['train']
