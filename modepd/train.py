@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import math
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
@@ -20,6 +21,7 @@ from transformers import (
     DataCollatorForLanguageModeling,
     get_scheduler,
 )
+from safetensors import SafetensorError
 
 from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
 
@@ -44,6 +46,18 @@ def parse_args():
     parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",)
     parser.add_argument("--evaluate_every", type=int, default=100)
 
+    parser.add_argument("--distillation", action='store_true')
+    parser.add_argument("--teacher_model_name_or_path", type=str, default=None)
+    parser.add_argument(
+        "--distillation_alpha", type=float, default=0.5,
+        help="Weight for distillation loss (0 to 1). Higher values put more weight on matching teacher outputs."
+    )
+    parser.add_argument(
+        "--distillation_temperature", type=float, default=2.0,
+        help="Temperature for softening probability distributions in distillation."
+    )
+    parser.add_argument("--disable_batch_aggregation", action='store_true')
+
     parser.add_argument("--block_size", type=int, default=4*1024,)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1,)
     parser.add_argument("--skip_train", action='store_true')
@@ -52,7 +66,7 @@ def parse_args():
     parser.add_argument("--zero_stage", type=int, default=0)
     parser.add_argument("--weight_decay", type=float, default=0.1,)
     parser.add_argument("--learning_rate", type=float, default=5e-5,)
-    parser.add_argument("--min_lr", type=float, default=5e-6,)
+    parser.add_argument("--min_lr", type=float, default=None,)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine_with_min_lr",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
@@ -66,6 +80,42 @@ def parse_args():
     parser.add_argument("--finetune_mod_only", action="store_true",)
 
     return parser.parse_args()
+
+
+def calculate_loss(outputs, batch, model, teacher_model, distillation_temperature, distillation_alpha, batch_aggregation=True):
+    # Shift so that tokens < n predict n
+    lm_loss = outputs.loss
+    shift_labels = batch['labels'][..., 1:].contiguous()
+    mask = shift_labels != -100
+    num_valid_tokens = mask.sum()
+
+    if teacher_model is not None:        
+        shift_logits = outputs.logits[..., :-1, :].contiguous()
+        with torch.no_grad():
+            teacher_outputs = teacher_model(**batch)
+            shift_teacher_logits = teacher_outputs.logits[..., :-1, :].contiguous()
+
+        masked_student_logits = shift_logits[mask] / distillation_temperature
+        masked_teacher_logits = shift_teacher_logits[mask] / distillation_temperature
+
+        distill_loss = F.kl_div(
+            input=F.log_softmax(masked_student_logits, dim=-1),
+            target=F.softmax(masked_teacher_logits, dim=-1),
+            reduction='batchmean',
+            log_target=False,
+        )
+
+        distill_loss = distill_loss * (distillation_temperature**2)
+        
+        loss = (1-distillation_alpha) * lm_loss + distillation_alpha * distill_loss
+    else:
+        loss = lm_loss
+        distill_loss = None
+
+    if batch_aggregation:
+        loss *= num_valid_tokens.float()
+    
+    return loss, distill_loss
 
 
 def main():
@@ -85,12 +135,33 @@ def main():
         zero_stage=args.zero_stage,
         zero3_save_16bit_model=True,
     )
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        deepspeed_plugin=deepspeed_plugin,
-        mixed_precision="bf16",
-        **accelerator_log_kwargs
-    )
+    if args.distillation:
+        inference_plugin = DeepSpeedPlugin(
+            hf_ds_config={
+                "bf16": {
+                    "enabled": True
+                },
+                "zero_optimization": {
+                    "stage": 0,
+                    "overlap_comm": True,
+                },
+                "train_micro_batch_size_per_gpu": 1
+            }
+        )
+        deepspeed_plugins = {"student": deepspeed_plugin, "teacher": inference_plugin}
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            mixed_precision="bf16",
+            deepspeed_plugins=deepspeed_plugins,
+            **accelerator_log_kwargs
+        )
+    else:
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            deepspeed_plugin=deepspeed_plugin,
+            mixed_precision="bf16",
+            **accelerator_log_kwargs
+        )
     
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -121,23 +192,32 @@ def main():
     #################
     # Prepare model & tokenizer
     model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
-
-    alloc, max_alloc, reserved, max_reserved = get_memory_stats()
+    embedding_size = model.get_input_embeddings().weight.shape[0]
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
-        f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
-        f", Memory stats after initializing model: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
-        main_process_only=False)
+        f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}, "
+        f"emb size: {embedding_size}, tokenizer vocab size: {len(tokenizer)}")
+
+    teacher_model = None
+    if args.distillation:
+        teacher_model, _ = prepare_model_and_tokenizer(args.teacher_model_name_or_path)
+        assert embedding_size == teacher_model.get_input_embeddings().weight.shape[0]
+
+        teacher_model.eval()
+        teacher_params = sum(p.numel() for p in teacher_model.parameters())
+        logger.info(f"Teacher model parameters: {teacher_params/1024**3:.2f} B, device: {teacher_model.device}, dtype: {teacher_model.dtype}")
+
+    alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     logger.info(
-        f"Model emb size: {model.get_input_embeddings().weight.shape[0]}"
-        f", tokenizer vocab size: {len(tokenizer)}")
-    
+        f"Memory stats after initializing model: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G", 
+        main_process_only=False)
+
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
-        # assert False, f"Tokenizer vocab size {len(tokenizer)} is larger than the model embedding size {embedding_size}."
+        if teacher_model:
+            teacher_model.resize_token_embeddings(len(tokenizer))
     
     # 3. DataLoaders creation
     if not args.skip_train:
@@ -182,7 +262,9 @@ def main():
     
     # Scheduler and math around the number of training steps.
     num_update_steps_per_epoch = args.max_train_steps * accelerator.num_processes
-    scheduler_specific_kwargs = {"min_lr": args.min_lr}
+    scheduler_specific_kwargs = {}
+    if args.min_lr is not None:
+        scheduler_specific_kwargs["min_lr"] = args.min_lr
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
@@ -196,6 +278,11 @@ def main():
         model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
             model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
         )
+        if args.distillation:
+            accelerator.state.select_deepspeed_plugin("teacher")
+            teacher_model = accelerator.prepare(teacher_model)
+            accelerator.state.select_deepspeed_plugin("student")
+            teacher_model.eval()
     else:
         model, optimizer, validation_dataloader, lr_scheduler = accelerator.prepare(
             model, optimizer, validation_dataloader, lr_scheduler
@@ -208,11 +295,6 @@ def main():
         f"Model parameters: {trainable_params/1024**3:.2f} B, device: {model.device}, dtype: {model.dtype}"
         f", Memory stats before training: Alloc: {alloc:.2f} G / {max_alloc:.2f} G, Resrv: {reserved:.2f} G / {max_reserved:.2f} G"
         , main_process_only=False)
-    if not args.skip_train:
-        for idx, batch in enumerate(train_dataloader):
-            logger.info(f"rank {accelerator.process_index} batch {idx}: {batch['input_ids'][0, :5].tolist()}", main_process_only=False)
-            if idx == 2:
-                break
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -266,6 +348,8 @@ def main():
         model.train()
         if args.with_tracking:
             step_loss = torch.zeros(1, device=model.device, dtype=torch.float)
+            if args.distillation:
+                step_distill_loss = torch.zeros(1, device=model.device, dtype=torch.float)
         if args.resume_from_checkpoint and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -277,10 +361,16 @@ def main():
         for step, batch in enumerate(active_dataloader):
             with accelerator.accumulate(model):
                 outputs = model(**batch)
-                loss = outputs.loss
-
+                # loss = outputs.loss
+                loss, distill_loss = calculate_loss(
+                    outputs, batch, model, teacher_model, args.distillation_temperature, 
+                    args.distillation_alpha, not args.disable_batch_aggregation
+                )
+                
                 if args.with_tracking:
                     step_loss += loss.detach().float()
+                    if args.distillation:
+                        step_distill_loss += distill_loss.detach().float()
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
@@ -293,29 +383,37 @@ def main():
                 if args.with_tracking:
                     step_loss /= args.gradient_accumulation_steps
                     global_loss = accelerator.reduce(step_loss, reduction='mean')
-                    # logger.info(f"completed_steps {completed_steps}: loss: {global_loss}, lr: {lr_scheduler.get_last_lr()}")
                     log_info = {"train_loss": global_loss.item(),}
+                    if args.distillation:
+                        step_distill_loss /= args.gradient_accumulation_steps
+                        global_distill_loss = accelerator.reduce(step_distill_loss, reduction='mean')
+                        log_info["distill_loss"] = global_distill_loss.item()
                     for lr_idx, lr in enumerate(lr_scheduler.get_last_lr()):
                         log_info[f"lr_{lr_idx}"] = lr
                     
                     accelerator.log(log_info, step=completed_steps)
                     step_loss.zero_()
+                    if args.distillation:
+                        step_distill_loss.zero_()
 
                 if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
                     output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(os.path.join(output_dir, "ckpt"))
+                    # accelerator.save_state(os.path.join(output_dir, "ckpt"))
 
-                    model_dir = os.path.join(output_dir, "model")
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    unwrapped_model.save_pretrained(
-                        model_dir, is_main_process=accelerator.is_main_process, 
-                        save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
-                    )
-                    if accelerator.is_main_process:
-                        tokenizer.save_pretrained(model_dir)
-                    logger.info(f"model&ckpt is saved to {output_dir}", main_process_only=False)
+                    try:
+                        model_dir = os.path.join(output_dir, "model")
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        unwrapped_model.save_pretrained(
+                            model_dir, is_main_process=accelerator.is_main_process, 
+                            save_function=accelerator.save, state_dict=accelerator.get_state_dict(model)
+                        )
+                        if accelerator.is_main_process:
+                            tokenizer.save_pretrained(model_dir)
+                        logger.info(f"model&ckpt is saved to {output_dir}", main_process_only=False)
+                    except SafetensorError as e:
+                        logger.warning(f"rank {accelerator.process_index} at step {step} fails in saving model.", main_process_only=False)
                     accelerator.wait_for_everyone()
 
                 if completed_steps % args.evaluate_every == 0:

@@ -371,6 +371,8 @@ def main():
         model.train()
         if args.with_tracking:
             step_loss = torch.zeros(1, device=model.device, dtype=torch.float)
+            if args.distillation:
+                step_distill_loss = torch.zeros(1, device=model.device, dtype=torch.float)
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -388,6 +390,8 @@ def main():
 
                 if args.with_tracking:
                     step_loss += loss.detach().float()
+                    if args.distillation:
+                        step_distill_loss += distill_loss.detach().float()
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
@@ -400,8 +404,11 @@ def main():
                 if args.with_tracking:
                     step_loss /= args.gradient_accumulation_steps
                     global_loss = accelerator.reduce(step_loss, reduction='mean')
-                    # logger.info(f"completed_steps {completed_steps}: loss: {global_loss}, lr: {lr_scheduler.get_last_lr()}")
                     log_info = {"train_loss": global_loss.item(),}
+                    if args.distillation:
+                        step_distill_loss /= args.gradient_accumulation_steps
+                        global_distill_loss = accelerator.reduce(step_distill_loss, reduction='mean')
+                        log_info = {"distill_loss": global_distill_loss.item()}
                     for lr_idx, lr in enumerate(lr_scheduler.get_last_lr()):
                         log_info[f"lr_{lr_idx}"] = lr
                     
