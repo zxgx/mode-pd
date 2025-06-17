@@ -18,6 +18,7 @@ from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
 from modepd.model.olmoe.configuration_olmoe import OlmoneConfig
 from modepd.model.olmoe.modeling_olmoe import OlmoneModel, OlmoneForCausalLM
 from modepd.dataset.olmoe_dataset import load_olmoe_mix_dataset
+from modepd.dataset.llama_nemontron_dataset import load_llama_nemotron_dataset
 
 GB = 1024**3
 
@@ -79,6 +80,8 @@ def build_dataset(
     else:
         if "OLMoE-mix-0924" in dataset_name_or_path:
             raw_dataset = load_olmoe_mix_dataset(os.path.join(dataset_name_or_path, "data"), streaming=streaming, seed=seed)[split]
+        elif "Llama-Nemotron-Post-Training-Dataset" in dataset_name_or_path:
+            raw_dataset = load_llama_nemotron_dataset(dataset_name_or_path, config_name=dataset_config_name, streaming=streaming, seed=seed, split=split)
         else:
             raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
     
