@@ -152,14 +152,14 @@ def calculate_loss(
 def main():
     args = parse_args()
 
-    sp_ulysses_vars = None
     if args.sequence_parallel_size > 1:
         if args.distillation:
             raise ValueError("Distillation is not supported with Ulysses sequence parallelism.")
         from deepspeed.runtime.sequence_parallel.ulysses_sp import UlyssesSPAttentionHF, UlyssesSPDataLoaderAdapter
         from deepspeed.utils import groups
+        import deepspeed
 
-        UlyssesSPAttentionHF.register_with_transformers(
+        mpu = UlyssesSPAttentionHF.register_with_transformers(
             model_name_or_path=args.model_name_or_path,
             core_attn_implementation="sdpa",
             sequence_parallel_size=args.sequence_parallel_size,
@@ -323,39 +323,27 @@ def main():
         scheduler_specific_kwargs=scheduler_specific_kwargs,
     )
 
-    # Prepare everything with `accelerator`.
-    if not args.skip_train:
-        # Do not prepare dataloaders with accelerator if using Ulysses
-        if args.sequence_parallel_size > 1:
-            model, optimizer, lr_scheduler = accelerator.prepare(
-                model, optimizer, lr_scheduler
-            )
-        else:
-            model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
-                model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
-            )
-
-        if args.distillation:
-            accelerator.state.select_deepspeed_plugin("teacher")
-            teacher_model = accelerator.prepare(teacher_model)
-            accelerator.state.select_deepspeed_plugin("student")
-            teacher_model.eval()
-    else:
-        if args.sequence_parallel_size > 1:
-            model, optimizer, lr_scheduler = accelerator.prepare(
-                model, optimizer, lr_scheduler
-            )
-        else:
-            model, optimizer, validation_dataloader, lr_scheduler = accelerator.prepare(
-                model, optimizer, validation_dataloader, lr_scheduler
-            )
-
+    sp_ulysses_vars = None
     if args.sequence_parallel_size > 1:
+        # HACK: a hack to get the deepspeed config from the plugin
+        # This is needed to initialize the model with deepspeed manually.
+        ds_config = accelerator.state.deepspeed_plugin.deepspeed_config
+        
+        model, optimizer, _, lr_scheduler = deepspeed.initialize(
+            model=model,
+            optimizer=optimizer,
+            args=args,
+            config=ds_config,
+            lr_scheduler=lr_scheduler,
+            dist_init_required=True,
+            mpu=mpu
+        )
+
         sp_group = groups._get_sequence_parallel_group()
         sp_world_size = groups._get_sequence_parallel_world_size()
         sp_rank = groups._get_sequence_parallel_rank()
         sp_ulysses_vars = (sp_group, sp_world_size)
-        
+
         if not args.skip_train:
             train_dataloader = UlyssesSPDataLoaderAdapter(
                 train_dataloader, sp_rank=sp_rank, sp_group=sp_group, sp_world_size=sp_world_size, device=model.device
@@ -363,11 +351,28 @@ def main():
         validation_dataloader = UlyssesSPDataLoaderAdapter(
             validation_dataloader, sp_rank=sp_rank, sp_group=sp_group, sp_world_size=sp_world_size, device=model.device
         )
+        
+        # Now that we have the dataloaders, we can prepare them with the accelerator.
         if not args.skip_train:
             train_dataloader, validation_dataloader = accelerator.prepare(train_dataloader, validation_dataloader)
         else:
             validation_dataloader = accelerator.prepare(validation_dataloader)
 
+    else:
+        # Prepare everything with `accelerator`.
+        if not args.skip_train:
+            model, optimizer, train_dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
+                model, optimizer, train_dataloader, validation_dataloader, lr_scheduler
+            )
+            if args.distillation:
+                accelerator.state.select_deepspeed_plugin("teacher")
+                teacher_model = accelerator.prepare(teacher_model)
+                accelerator.state.select_deepspeed_plugin("student")
+                teacher_model.eval()
+        else:
+            model, optimizer, validation_dataloader, lr_scheduler = accelerator.prepare(
+                model, optimizer, validation_dataloader, lr_scheduler
+            )
 
     alloc, max_alloc, reserved, max_reserved = get_memory_stats()
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
