@@ -2,16 +2,25 @@ import json
 import logging
 from itertools import chain
 import torch
+from torch.utils.data import IterableDataset
 
 from datasets import load_dataset, interleave_datasets
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHAT_TEMPLATE = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|system|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\n'  + message['content'] + eos_token }}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}{% endfor %}"
+
 
 def _format_and_tokenize(example, tokenizer):
     """
     Formats a single SFT example using the tokenizer's chat template,
     tokenizes it, and creates labels with prompt masking.
     """
+    # Set a default chat template if the tokenizer doesn't have one
+    if tokenizer.chat_template is None:
+        logger.warning("Tokenizer does not have a chat_template, using a default template.")
+        tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+
     # 1. Parse the input into a list of messages (the prompt)
     try:
         if isinstance(example['input'], str) and example['input']:
@@ -43,9 +52,7 @@ def _format_and_tokenize(example, tokenizer):
         add_special_tokens=False
     )
     
-    # Add EOS token at the end of the full sequence. This is standard for SFT.
-    if tokenizer.eos_token_id is not None:
-        full_tokens.append(tokenizer.eos_token_id)
+    # The chat template should handle the EOS token. No manual append needed.
 
     # 5. Create labels by masking the prompt part.
     labels = [-100] * len(prompt_tokens) + full_tokens[len(prompt_tokens):]
@@ -59,61 +66,70 @@ def _format_and_tokenize(example, tokenizer):
         
     return input_ids, labels
 
-def build_packed_sft_dataset(
-    dataset_name, config_name, tokenizer, streaming=True, seed=None, 
-    split='train', block_size=32768, num_validation_samples=None
-):
+
+class PackedSFTDataset(IterableDataset):
     """
-    Builds a dataset for SFT with sequence packing.
-
-    Args:
-        dataset_name (str or list): Name of the dataset or list of splits.
-        tokenizer: The tokenizer to use.
-        block_size (int): The desired sequence length for packing.
-        ... and other dataset args.
-
-    Returns:
-        An iterable dataset yielding packed sequences.
+    An iterable dataset that packs sequences for SFT.
+    This class wraps the sequence packing generator to make it compatible with PyTorch's DataLoader.
     """
-    logger.info(f"Building packed SFT dataset for split '{split}' with block size {block_size}")
+    def __init__(self, dataset_name, config_name, tokenizer, streaming, seed, split, block_size, num_validation_samples=None):
+        self.dataset_name = dataset_name
+        self.config_name = config_name
+        self.tokenizer = tokenizer
+        self.streaming = streaming
+        self.seed = seed
+        self.split = split
+        self.block_size = block_size
+        self.num_validation_samples = num_validation_samples
 
-    # Load the raw dataset, handling multiple splits if necessary
-    if isinstance(split, list):
-        datasets_to_interleave = [
-            load_dataset(dataset_name, name=config_name, split=s, streaming=streaming) for s in split
-        ]
-        raw_dataset = interleave_datasets(datasets_to_interleave, seed=seed)
-    else:
-        raw_dataset = load_dataset(dataset_name, name=config_name, split=split, streaming=streaming)
+    def __iter__(self):
+        # Load the raw dataset, handling multiple splits if necessary
+        if isinstance(self.split, list):
+            datasets_to_interleave = [
+                load_dataset(self.dataset_name, name=self.config_name, split=s, streaming=self.streaming) for s in self.split
+            ]
+            raw_dataset = interleave_datasets(datasets_to_interleave, seed=self.seed)
+        else:
+            raw_dataset = load_dataset(self.dataset_name, name=self.config_name, split=self.split, streaming=self.streaming)
 
-    # For creating a validation set from the training data
-    if num_validation_samples:
-        raw_dataset = raw_dataset.shuffle(seed=seed, buffer_size=10_000).take(num_validation_samples)
-    
-    def packed_sequence_generator():
+        # For creating a validation set from the training data
+        if self.num_validation_samples:
+            raw_dataset = raw_dataset.shuffle(seed=self.seed, buffer_size=10_000).take(self.num_validation_samples)
+        
         buffer_input_ids = []
         buffer_labels = []
 
         for example in raw_dataset:
-            input_ids, labels = _format_and_tokenize(example, tokenizer)
+            input_ids, labels = _format_and_tokenize(example, self.tokenizer)
             if input_ids is None:
                 continue
             
             buffer_input_ids.extend(input_ids)
             buffer_labels.extend(labels)
 
-            while len(buffer_input_ids) >= block_size:
-                packed_input_ids = buffer_input_ids[:block_size]
-                packed_labels = buffer_labels[:block_size]
+            while len(buffer_input_ids) >= self.block_size:
+                packed_input_ids = buffer_input_ids[:self.block_size]
+                packed_labels = buffer_labels[:self.block_size]
 
                 yield {
                     "input_ids": torch.tensor(packed_input_ids, dtype=torch.long),
                     "labels": torch.tensor(packed_labels, dtype=torch.long),
-                    "attention_mask": torch.ones(block_size, dtype=torch.long)
+                    "attention_mask": torch.ones(self.block_size, dtype=torch.long)
                 }
                 
                 # Carry over the remainder to the next iteration
-                buffer_input_ids = buffer_input_ids[block_size:]
-                buffer_labels = buffer_labels[block_size:]
+                buffer_input_ids = buffer_input_ids[self.block_size:]
+                buffer_labels = buffer_labels[self.block_size:]
 
-    return packed_sequence_generator() 
+
+def build_packed_sft_dataset(
+    dataset_name, config_name, tokenizer, streaming=True, seed=None, 
+    split='train', block_size=32768, num_validation_samples=None
+):
+    """
+    Builds an IterableDataset for SFT with sequence packing.
+    """
+    logger.info(f"Building packed SFT IterableDataset for split '{split}' with block size {block_size}")
+    return PackedSFTDataset(
+        dataset_name, config_name, tokenizer, streaming, seed, split, block_size, num_validation_samples
+    ) 
