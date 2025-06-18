@@ -30,7 +30,8 @@ from deepspeed.utils import groups
 from deepspeed.utils.logging import logger
 import deepspeed.comm as dist
 
-from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
+from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats
+from modepd.dataset.nemotron_sft_dataset import build_packed_sft_dataset
 
 
 # logger = logging.getLogger(__name__)
@@ -49,13 +50,13 @@ def parse_args():
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",)
 
     parser.add_argument("--dataset_name_or_path", type=str, default="allenai/OLMoE-mix-0924",)
-    parser.add_argument("--dataset_config_name", type=str, default=None,)
+    parser.add_argument("--dataset_config_name", type=str, default='SFT',)
     parser.add_argument("--train_splits", type=str, default="train", help="comma-separated list of splits for training, e.g. 'math,code'")
     parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--streaming_dataset", action='store_true')
     parser.add_argument("--validation_dataset_name_or_path", type=str, default="Salesforce/wikitext")
     parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",)
-    parser.add_argument("--validation_from_train_split", type=float, default=None, help="Percentage of training data to use for validation, e.g. 0.1 for 10%. Overrides validation_dataset_name_or_path.")
+    parser.add_argument("--validation_samples_from_train", type=int, default=None, help="Numbers of training samples to use for validation")
     parser.add_argument("--evaluate_every", type=int, default=100)
 
     parser.add_argument("--block_size", type=int, default=4*1024,)
@@ -82,28 +83,34 @@ def parse_args():
 
 
 def calculate_loss(outputs, batch, model, sp_ulysses_vars):
-    sp_group, sp_world_size = sp_ulysses_vars
-    shift_labels = batch["shift_labels"]
-    # model.module is the unwrapped model
-    loss = model.module.loss_function(
-        logits=outputs.logits,
-        labels=None,
-        shift_labels=shift_labels,
-        vocab_size=model.module.config.vocab_size,
-    )
-
-    losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
-    good_tokens = sum((shift_labels != -100).view(-1))
-    good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-    total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-    total_good_tokens = sum(good_tokens_per_rank)
-    
-    if total_good_tokens > 0:
-        loss = total_loss / total_good_tokens
+    if sp_ulysses_vars is None:
+        shift_labels = batch['labels'][..., 1:].contiguous()
+        loss = outputs.loss
+        total_good_tokens = sum((shift_labels != -100).view(-1))
+        
     else:
-        loss = torch.tensor(0.0, device=model.device)
+        sp_group, sp_world_size = sp_ulysses_vars
+        shift_labels = batch["shift_labels"]
+        # model.module is the unwrapped model
+        loss = model.module.loss_function(
+            logits=outputs.logits,
+            labels=None,
+            shift_labels=shift_labels,
+            vocab_size=model.module.config.vocab_size,
+        )
 
-    return loss
+        losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
+        good_tokens = sum((shift_labels != -100).view(-1))
+        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
+        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
+        total_good_tokens = sum(good_tokens_per_rank)
+        
+        if total_good_tokens > 0:
+            loss = total_loss / total_good_tokens
+        else:
+            loss = torch.tensor(0.0, device=model.device)
+
+    return loss, total_good_tokens
 
 
 def main():
@@ -154,39 +161,37 @@ def main():
     model = model.to(device)
 
     # === Datasets ===
+    train_dataloader = None
+    validation_dataloader = None
+    
     if not args.skip_train:
         train_splits = [s.strip() for s in args.train_splits.split(',')]
         if len(train_splits) == 1:
             train_splits = train_splits[0]
 
-    validation_dataset = None
-    if args.validation_from_train_split is not None:
-        if not 0 < args.validation_from_train_split < 1:
-            raise ValueError("validation_from_train_split must be a float between 0 and 1")
-        if not args.skip_train:
-            split_percentage = int(args.validation_from_train_split * 100)
-            train_split_spec = f"train[:{100-split_percentage}%]"
-            val_split_spec = f"train[{100-split_percentage}%:]"
-            
-            # This works for single splits, may need adjustment for multiple splits
-            if isinstance(train_splits, list):
-                logger.warning("Validation split from train is not guaranteed to be balanced across multiple splits.")
+        train_dataset = build_packed_sft_dataset(
+            dataset_name=args.dataset_name_or_path,
+            config_name=args.dataset_config_name,
+            tokenizer=tokenizer,
+            streaming=args.streaming_dataset,
+            seed=args.seed,
+            split=train_splits,
+            block_size=args.block_size
+        )
+        train_dataloader = DataLoader(train_dataset, batch_size=args.per_device_train_batch_size)
 
-            train_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, train_split_spec, args.data_type, args.block_size, logger, seed=args.seed)
-            validation_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, val_split_spec, is_validation=True, block_size=args.block_size, logger=logger)
-        else:
-             raise ValueError("Cannot use validation_from_train_split with skip_train")
-
-    else:
-        if not args.skip_train:
-            train_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, train_splits, args.data_type, args.block_size, logger, seed=args.seed)
-        validation_dataset = build_dataset(args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', is_validation=True, block_size=args.block_size, logger=logger)
-
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    
-    if not args.skip_train:
-        train_dataloader = DataLoader(train_dataset, collate_fn=data_collator, batch_size=args.per_device_train_batch_size)
-    validation_dataloader = DataLoader(validation_dataset, collate_fn=data_collator, batch_size=args.per_device_train_batch_size)
+    if args.validation_samples_from_train:
+        validation_dataset = build_packed_sft_dataset(
+            dataset_name=args.dataset_name_or_path,
+            config_name=args.dataset_config_name,
+            tokenizer=tokenizer,
+            streaming=args.streaming_dataset,
+            seed=args.seed,
+            split=train_splits, # Sample from the same training splits
+            block_size=args.block_size,
+            num_validation_samples=args.validation_samples_from_train
+        )
+        validation_dataloader = DataLoader(validation_dataset, batch_size=args.per_device_train_batch_size)
     
     # === Optimizer and Scheduler ===
     no_decay = ["bias", "layer_norm.weight"]
@@ -266,7 +271,7 @@ def main():
         for step, batch in enumerate(active_dataloader):
             batch = move_to_device(batch, device)
             outputs = model(**batch)
-            loss = calculate_loss(outputs, batch, model, sp_ulysses_vars)
+            loss, num_good_tokens = calculate_loss(outputs, batch, model, sp_ulysses_vars)
             
             model.backward(loss)
             model.step()
@@ -277,13 +282,19 @@ def main():
             if writer:
                 writer.add_scalar("loss/train", loss.item(), completed_steps)
                 writer.add_scalar("lr", lr_scheduler.get_last_lr()[0], completed_steps)
+                if sp_ulysses_vars is None:
+                    # Only log token count if not using SP, as SP already aggregates
+                    writer.add_scalar("good_tokens/train", num_good_tokens.item(), completed_steps)
 
             if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
                 ckpt_dir = os.path.join(args.output_dir, f"step_{completed_steps}")
                 model.save_checkpoint(ckpt_dir, client_state={'step': completed_steps})
 
             if completed_steps % args.evaluate_every == 0:
-                evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
+                if validation_dataloader:
+                    evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
+                else:
+                    logger.info(f"Skipping evaluation at step {completed_steps} as no validation set is configured.")
                 model.train() # Switch back to train mode
 
             if completed_steps >= args.max_train_steps:
@@ -291,7 +302,8 @@ def main():
     
     # === Final Evaluation and Saving ===
     logger.info("***** Running Final Evaluation *****")
-    evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
+    if validation_dataloader:
+        evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
 
     if args.output_dir is not None and is_main_process:
         logger.info(f"Saving final model to {args.output_dir}")
@@ -311,7 +323,7 @@ def evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_step
         batch = move_to_device(batch, model.device)
         with torch.no_grad():
             outputs = model(**batch)
-            loss = calculate_loss(outputs, batch, model, sp_ulysses_vars)
+            loss, _ = calculate_loss(outputs, batch, model, sp_ulysses_vars)
         
         # Gather losses from all ranks
         world_size = dist.get_world_size()

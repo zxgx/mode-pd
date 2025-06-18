@@ -1,8 +1,10 @@
 import argparse
 import logging
 from itertools import islice
+import torch
 
-from modepd.utils import build_dataset, prepare_model_and_tokenizer, register_custom_model
+from modepd.utils import prepare_model_and_tokenizer, register_custom_model
+from modepd.dataset.nemotron_sft_dataset import build_packed_sft_dataset
 
 # Configure logging
 logging.basicConfig(
@@ -12,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test script for building the Llama-Nemotron dataset.")
+    parser = argparse.ArgumentParser(description="Test script for building the packed Llama-Nemotron SFT dataset.")
     parser.add_argument(
         "--model_name_or_path",
         type=str,
@@ -34,19 +36,20 @@ def parse_args():
     parser.add_argument(
         "--train_splits",
         type=str,
-        default="math",
+        default="math,code",
         help="Comma-separated list of splits for training, e.g., 'math,code'.",
     )
     parser.add_argument(
         "--streaming",
         action="store_true",
+        default=True,
         help="Enable streaming for the dataset.",
     )
     parser.add_argument(
         "--block_size",
         type=int,
         default=4096,
-        help="The block size for tokenization and grouping texts.",
+        help="The block size for sequence packing.",
     )
     parser.add_argument(
         "--num_samples_to_show",
@@ -59,48 +62,39 @@ def parse_args():
 def main():
     args = parse_args()
 
-    logger.info("Starting dataset build test...")
+    logger.info("Starting packed SFT dataset build test...")
 
     # Register custom models (important for tokenizer loading if custom config is used)
     register_custom_model()
 
     # 1. Prepare tokenizer
     logger.info(f"Loading tokenizer from '{args.model_name_or_path}'...")
-    # We only need the tokenizer for this test
     _, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
 
-    # 2. Build dataset
+    # 2. Build dataset using the new packed SFT builder
     train_splits = [s.strip() for s in args.train_splits.split(',')]
     if len(train_splits) == 1:
         train_splits = train_splits[0]
         
-    logger.info(f"Building dataset '{args.dataset_name_or_path}' with config '{args.dataset_config_name}' and splits '{train_splits}'...")
+    logger.info(f"Building packed SFT dataset '{args.dataset_name_or_path}' with config '{args.dataset_config_name}' and splits '{train_splits}'...")
     
-    # We set `is_validation=False` to test the main training data processing path (with grouping)
-    # Set accelerator=None as we are running on a single process
-    lm_dataset = build_dataset(
-        dataset_name_or_path=args.dataset_name_or_path,
-        dataset_config_name=args.dataset_config_name,
-        streaming=args.streaming,
+    packed_dataset_generator = build_packed_sft_dataset(
+        dataset_name=args.dataset_name_or_path,
+        config_name=args.dataset_config_name,
         tokenizer=tokenizer,
+        streaming=args.streaming,
+        seed=42,
         split=train_splits,
         block_size=args.block_size,
-        logger=logger,
-        accelerator=None, # Not using accelerator for this test
-        seed=42,
-        is_validation=False,
     )
 
-    logger.info("Dataset built successfully. Inspecting samples...")
+    logger.info("Dataset generator created. Inspecting samples...")
 
-    # 3. Inspect a few samples from the dataset
-    if args.streaming:
-        samples = list(islice(lm_dataset, args.num_samples_to_show))
-    else:
-        samples = lm_dataset.select(range(args.num_samples_to_show))
+    # 3. Inspect a few samples from the dataset generator
+    samples = list(islice(packed_dataset_generator, args.num_samples_to_show))
 
     if not samples:
-        logger.warning("Could not retrieve any samples from the dataset. It might be empty or the streaming failed.")
+        logger.warning("Could not retrieve any samples from the dataset generator. It might be empty or the streaming failed.")
         return
         
     for i, sample in enumerate(samples):
@@ -108,17 +102,41 @@ def main():
         
         # Print keys and shapes
         for key, value in sample.items():
-            # Tensors have shape, lists have len
             size = value.shape if hasattr(value, 'shape') else len(value)
             logger.info(f"  Key: '{key}', Length/Shape: {size}")
 
-        # Decode and print the text to verify formatting
         input_ids = sample['input_ids']
-        decoded_text = tokenizer.decode(input_ids, skip_special_tokens=False)
-        
-        logger.info(f"  Decoded Text (first 200 chars): \n---\n{decoded_text[:200]}...\n---")
-        logger.info(f"  Decoded Text (last 200 chars): \n---\n...{decoded_text[-200:]}\n---")
+        labels = sample['labels']
 
+        # Verify that the sequence length matches the block size
+        if len(input_ids) != args.block_size:
+            logger.warning(f"  Sample size ({len(input_ids)}) does not match block_size ({args.block_size})!")
+
+        # Decode and print the text to verify formatting
+        decoded_text = tokenizer.decode(input_ids, skip_special_tokens=False)
+        logger.info(f"  Decoded Text (first 200 chars): \n---\n{decoded_text[:200]}...\n---")
+
+        # Verify label masking
+        masked_count = (labels == -100).sum().item()
+        unmasked_count = (labels != -100).sum().item()
+        logger.info(f"  Label masking: {masked_count} tokens masked (prompts), {unmasked_count} tokens unmasked (responses).")
+        
+        # Show the transition from masked prompt to unmasked response
+        try:
+            first_unmasked_idx_tensor = (labels != -100).nonzero(as_tuple=True)[0]
+            if len(first_unmasked_idx_tensor) > 0:
+                first_unmasked_idx = first_unmasked_idx_tensor[0].item()
+                
+                logger.info("  Verifying a mask transition point:")
+                start = max(0, first_unmasked_idx - 20)
+                end = first_unmasked_idx + 20
+                
+                logger.info(f"    Decoded Input around transition: ...{tokenizer.decode(input_ids[start:end])}...")
+                logger.info(f"    Labels around transition:        ...{labels[start:end].tolist()}...")
+            else:
+                logger.warning("  No unmasked tokens found in this sample.")
+        except IndexError:
+            logger.error("  Could not find an unmasked token to display transition.")
 
 if __name__ == "__main__":
     main() 
