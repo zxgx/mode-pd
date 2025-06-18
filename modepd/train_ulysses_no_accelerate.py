@@ -1,9 +1,9 @@
 """
-A training script for Ulysses sequence parallelism that does not use the Hugging Face Accelerator library.
+A training script for Ulysses sequence parallelism.
 It handles distributed training, checkpointing, and evaluation manually using DeepSpeed and PyTorch.
 """
 import argparse
-import logging
+import logging 
 import os
 import json
 from tqdm.auto import tqdm
@@ -27,12 +27,13 @@ import deepspeed
 from deepspeed.runtime.utils import set_random_seed, move_to_device
 from deepspeed.runtime.sequence_parallel.ulysses_sp import UlyssesSPAttentionHF, UlyssesSPDataLoaderAdapter
 from deepspeed.utils import groups
+from deepspeed.utils.logging import logger
 import deepspeed.comm as dist
 
 from modepd.utils import register_custom_model, prepare_model_and_tokenizer, get_memory_stats, build_dataset
 
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 register_custom_model()
 
 def parse_args():
@@ -49,10 +50,12 @@ def parse_args():
 
     parser.add_argument("--dataset_name_or_path", type=str, default="allenai/OLMoE-mix-0924",)
     parser.add_argument("--dataset_config_name", type=str, default=None,)
+    parser.add_argument("--train_splits", type=str, default="train", help="comma-separated list of splits for training, e.g. 'math,code'")
     parser.add_argument("--data_type", type=str, default=None)
     parser.add_argument("--streaming_dataset", action='store_true')
     parser.add_argument("--validation_dataset_name_or_path", type=str, default="Salesforce/wikitext")
     parser.add_argument("--validation_dataset_config_name", type=str, default="wikitext-2-raw-v1",)
+    parser.add_argument("--validation_from_train_split", type=float, default=None, help="Percentage of training data to use for validation, e.g. 0.1 for 10%. Overrides validation_dataset_name_or_path.")
     parser.add_argument("--evaluate_every", type=int, default=100)
 
     parser.add_argument("--block_size", type=int, default=4*1024,)
@@ -119,12 +122,14 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
     
     # === Logging setup ===
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
-    logger.info(f"Starting script on rank {dist.get_rank()}/{world_size}", main_process_only=False)
+    # logging.basicConfig(
+    #     format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
+    #     datefmt="%m/%d/%Y %H:%M:%S",
+    #     level=logging.INFO,
+    # )
+    logger.setLevel(logging.INFO)
+    # logger.info(f"Starting script on rank {dist.get_rank()}/{world_size}", main_process_only=False)
+    logger.info(f"Starting script on rank {dist.get_rank()}/{world_size}")
 
     writer = None
     if args.with_tracking and is_main_process:
@@ -150,9 +155,33 @@ def main():
 
     # === Datasets ===
     if not args.skip_train:
-        train_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', args.data_type, args.block_size, logger, seed=args.seed)
-    validation_dataset = build_dataset(args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', block_size=args.block_size, logger=logger)
-    
+        train_splits = [s.strip() for s in args.train_splits.split(',')]
+        if len(train_splits) == 1:
+            train_splits = train_splits[0]
+
+    validation_dataset = None
+    if args.validation_from_train_split is not None:
+        if not 0 < args.validation_from_train_split < 1:
+            raise ValueError("validation_from_train_split must be a float between 0 and 1")
+        if not args.skip_train:
+            split_percentage = int(args.validation_from_train_split * 100)
+            train_split_spec = f"train[:{100-split_percentage}%]"
+            val_split_spec = f"train[{100-split_percentage}%:]"
+            
+            # This works for single splits, may need adjustment for multiple splits
+            if isinstance(train_splits, list):
+                logger.warning("Validation split from train is not guaranteed to be balanced across multiple splits.")
+
+            train_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, train_split_spec, args.data_type, args.block_size, logger, seed=args.seed)
+            validation_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, val_split_spec, is_validation=True, block_size=args.block_size, logger=logger)
+        else:
+             raise ValueError("Cannot use validation_from_train_split with skip_train")
+
+    else:
+        if not args.skip_train:
+            train_dataset = build_dataset(args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, train_splits, args.data_type, args.block_size, logger, seed=args.seed)
+        validation_dataset = build_dataset(args.validation_dataset_name_or_path, args.validation_dataset_config_name, args.streaming_dataset, tokenizer, 'validation', is_validation=True, block_size=args.block_size, logger=logger)
+
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     
     if not args.skip_train:

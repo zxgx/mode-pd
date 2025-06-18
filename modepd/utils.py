@@ -69,7 +69,8 @@ def get_memory_stats():
 
 def build_dataset(
     dataset_name_or_path, dataset_config_name, streaming, tokenizer, split, 
-    data_type=None, block_size=4*1024, logger=None, accelerator=None, seed=None
+    data_type=None, block_size=4*1024, logger=None, accelerator=None, seed=None,
+    is_validation=False,
 ):
     main_process_context = accelerator.main_process_first if accelerator is not None else nullcontext
 
@@ -85,9 +86,18 @@ def build_dataset(
         else:
             raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
     
-    # comment the following will unpack samples, which leads to larger ppl
-    if split == 'validation':
-        split = 'train'
+    if is_validation and split == 'validation':
+        # For some datasets like wikitext, validation is a split, but we want to process it like train in terms of tokenization
+        # but without grouping. The logic below handles this.
+        # However, some datasets (e.g. C4) don't have a 'validation' split and use 'train' for everything.
+        # We try to load 'validation', and if it fails, we assume we need to use 'train'.
+        try:
+            # Check if validation split exists
+            load_dataset(dataset_name_or_path, dataset_config_name, split='validation', streaming=True).info
+        except (ValueError, KeyError):
+            if logger:
+                logger.info("Validation split not found, using train split for validation.")
+            split = 'train'
 
     if block_size is None:
         block_size = tokenizer.model_max_length
@@ -106,7 +116,7 @@ def build_dataset(
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     def tokenize_function(examples):
-        if split == 'validation':
+        if is_validation:
             result = tokenizer(
                 [each for each in examples[text_column_name] if len(each) > 0], 
                 max_length=block_size, padding="max_length", truncation=True,
@@ -124,7 +134,7 @@ def build_dataset(
         )
 
     # 2. Padding to max length    
-    if split == 'validation':
+    if is_validation:
         return tokenized_dataset
     else:
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
