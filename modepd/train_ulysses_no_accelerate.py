@@ -118,7 +118,7 @@ def main():
     
     # === Distributed setup ===
     deepspeed.init_distributed()
-    local_rank = args.local_rank
+    local_rank = int(os.environ.get("RANK", 0))
     device = torch.device("cuda", local_rank)
     torch.cuda.set_device(device)
     set_random_seed(args.seed)
@@ -153,6 +153,19 @@ def main():
             micro_batch_size=args.per_device_train_batch_size,
             seq_length_is_variable=True,
         )
+        # Monkey-patch for deepspeed issue.
+        # The bf16_optimizer expects model parallel utility functions on the mpu object,
+        # but the sequence parallel mpu object does not have them.
+        # We add dummy implementations for a sequence-parallel-only setup.
+        if not hasattr(mpu, 'get_model_parallel_rank'):
+            mpu.get_model_parallel_rank = lambda: 0
+        if not hasattr(mpu, 'get_model_parallel_world_size'):
+            mpu.get_model_parallel_world_size = lambda: 1
+        if not hasattr(mpu, 'get_model_parallel_group'):
+            # The bf16_optimizer requires a valid process group, even for a world size of 1.
+            # We create a new group containing only the current process to act as a dummy.
+            mpu.model_parallel_group = dist.new_group([dist.get_rank()])
+            mpu.get_model_parallel_group = lambda: mpu.model_parallel_group
 
     # === Model and Tokenizer ===
     model, tokenizer = prepare_model_and_tokenizer(args.model_name_or_path)
@@ -162,7 +175,7 @@ def main():
 
     # === Datasets ===
     train_dataloader = None
-    validation_dataloader = None
+    validation_dataset = None
     
     if not args.skip_train:
         train_splits = [s.strip() for s in args.train_splits.split(',')]
@@ -191,7 +204,6 @@ def main():
             block_size=args.block_size,
             num_validation_samples=args.validation_samples_from_train
         )
-        validation_dataloader = DataLoader(validation_dataset, batch_size=args.per_device_train_batch_size)
     
     # === Optimizer and Scheduler ===
     no_decay = ["bias", "layer_norm.weight"]
@@ -244,7 +256,6 @@ def main():
 
         if not args.skip_train:
             train_dataloader = UlyssesSPDataLoaderAdapter(train_dataloader, sp_rank, sp_group, sp_world_size, model.device)
-        validation_dataloader = UlyssesSPDataLoaderAdapter(validation_dataloader, sp_rank, sp_group, sp_world_size, model.device)
     
     # === Checkpoint Loading ===
     completed_steps = 0
@@ -291,8 +302,8 @@ def main():
                 model.save_checkpoint(ckpt_dir, client_state={'step': completed_steps})
 
             if completed_steps % args.evaluate_every == 0:
-                if validation_dataloader:
-                    evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
+                if validation_dataset is not None:
+                    evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, writer, is_main_process)
                 else:
                     logger.info(f"Skipping evaluation at step {completed_steps} as no validation set is configured.")
                 model.train() # Switch back to train mode
@@ -302,8 +313,8 @@ def main():
     
     # === Final Evaluation and Saving ===
     logger.info("***** Running Final Evaluation *****")
-    if validation_dataloader:
-        evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process)
+    if validation_dataset is not None:
+        evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, writer, is_main_process)
 
     if args.output_dir is not None and is_main_process:
         logger.info(f"Saving final model to {args.output_dir}")
@@ -316,10 +327,27 @@ def main():
     logger.info("Training finished.")
 
 
-def evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_steps, writer, is_main_process):
+def evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, writer, is_main_process):
     model.eval()
     losses = []
-    for batch in tqdm(validation_dataloader, desc=f"Evaluation at step {completed_steps}", disable=not is_main_process):
+
+    validation_dataloader = DataLoader(validation_dataset, batch_size=args.per_device_train_batch_size)
+    if sp_ulysses_vars is not None:
+        sp_group, sp_world_size = sp_ulysses_vars
+        sp_rank = groups._get_sequence_parallel_rank()
+        validation_dataloader = UlyssesSPDataLoaderAdapter(validation_dataloader, sp_rank, sp_group, sp_world_size, model.device)
+    
+    num_eval_steps = None
+    if args.validation_samples_from_train:
+        world_size = dist.get_world_size()
+        dp_world_size = world_size // args.sequence_parallel_size
+        global_batch_size = args.per_device_train_batch_size * dp_world_size
+        # The Ulysses adapter will handle the sharding across SP ranks.
+        # We need to calculate the number of steps for the data parallel dimension.
+        num_eval_steps = math.ceil(args.validation_samples_from_train / global_batch_size)
+
+    eval_iterator = tqdm(validation_dataloader, total=num_eval_steps, desc=f"Evaluation at step {completed_steps}", disable=not is_main_process)
+    for batch in eval_iterator:
         batch = move_to_device(batch, model.device)
         with torch.no_grad():
             outputs = model(**batch)
@@ -333,6 +361,10 @@ def evaluate(args, model, validation_dataloader, sp_ulysses_vars, completed_step
 
     # Since all ranks have all losses, we only need to calculate perplexity on the main process
     if is_main_process:
+        if not losses:
+            logger.warning(f"Evaluation at step {completed_steps} resulted in no losses, skipping perplexity calculation.")
+            return
+
         try:
             eval_loss = torch.mean(torch.stack(losses))
             perplexity = math.exp(eval_loss)
