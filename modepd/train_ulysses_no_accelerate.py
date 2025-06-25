@@ -118,7 +118,9 @@ def main():
     
     # === Distributed setup ===
     deepspeed.init_distributed()
-    local_rank = int(os.environ.get("RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank == -1:
+        raise ValueError("LOCAL_RANK environment variable is not set. Please run with deepspeed launcher.")
     device = torch.device("cuda", local_rank)
     torch.cuda.set_device(device)
     set_random_seed(args.seed)
