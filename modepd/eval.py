@@ -11,6 +11,7 @@ register_custom_model()
 import torch
 import torch.nn.functional as F
 import lm_eval
+from lm_eval.api.model import LM
 from lm_eval.models.huggingface import HFLM
 
 from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MLP
@@ -76,6 +77,24 @@ def get_args():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--stats_output_dir", type=str, default=None)
     parser.add_argument("--analyse", action='store_true')
+    # post-processing for think pattern
+    parser.add_argument(
+        "--postprocess_think_pattern", 
+        action="store_true",
+        help="Enable post-processing to extract answers from think pattern output"
+    )
+    parser.add_argument(
+        "--think_start_pattern",
+        type=str,
+        default="<think>",
+        help="Pattern that marks the start of thinking content"
+    )
+    parser.add_argument(
+        "--think_end_pattern", 
+        type=str,
+        default="</think>",
+        help="Pattern that marks the end of thinking content"
+    )
 
     return parser.parse_args()
 
@@ -222,6 +241,69 @@ class Analyser:
             )
 
 
+class ThinkPatternPostprocessWrapper(LM):
+    """
+    A wrapper for lm-eval models to post-process think pattern outputs.
+    Removes thinking content enclosed in <think></think> tags and extracts the final answer.
+    """
+    def __init__(self, model: LM, start_pattern="<think>", end_pattern="</think>"):
+        super().__init__()
+        self.model = model
+        self.start_pattern = start_pattern
+        self.end_pattern = end_pattern
+
+    def __getattr__(self, name):
+        """Delegates attributes to the wrapped model."""
+        return getattr(self.model, name)
+
+    def loglikelihood(self, *args, **kwargs):
+        return self.model.loglikelihood(*args, **kwargs)
+
+    def loglikelihood_rolling(self, *args, **kwargs):
+        return self.model.loglikelihood_rolling(*args, **kwargs)
+
+    def generate_until(self, *args, **kwargs):
+        """
+        Calls the original model's generation and then post-processes the output
+        to remove think patterns and extract final answers.
+        """
+        full_generations = self.model.generate_until(*args, **kwargs)
+        
+        processed_generations = []
+        for text in full_generations:
+            processed_text = self._extract_final_answer(text)
+            processed_generations.append(processed_text)
+            
+        return processed_generations
+
+    def _extract_final_answer(self, text):
+        """
+        Extract the final answer by removing think pattern content.
+        """
+        processed_text = text
+        
+        # Remove all <think>...</think> blocks
+        while self.start_pattern in processed_text and self.end_pattern in processed_text:
+            start_idx = processed_text.find(self.start_pattern)
+            end_idx = processed_text.find(self.end_pattern, start_idx)
+            
+            if start_idx != -1 and end_idx != -1:
+                # Remove the think block including the tags
+                end_idx += len(self.end_pattern)
+                processed_text = processed_text[:start_idx] + processed_text[end_idx:]
+            else:
+                break
+        
+        # Clean up extra whitespace
+        processed_text = processed_text.strip()
+        
+        # Log the transformation for debugging
+        if processed_text != text:
+            logging.debug(f"Think pattern removed. Original length: {len(text)}, Processed length: {len(processed_text)}")
+        
+        return processed_text
+
+
 def main():
     args = get_args()
     logging.info(f"{pformat(vars(args), indent=2, width=120)}")
@@ -258,16 +340,30 @@ def main():
         "confirm_run_unsafe_code": True,
     }
     
-    lm_obj = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
-    lm_obj.model.cuda()
-    lm_obj.model.config.use_cache = True
-    lm_obj.model.generation_config.use_cache = True
+    # The HFLM instance that lm-eval can work with.
+    hflm_model = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
+    hflm_model.model.cuda()
+    hflm_model.model.config.use_cache = True
+    hflm_model.model.generation_config.use_cache = True
     if "DeepSeek-V2" in hf_model:
-        lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
+        hflm_model.model.generation_config.pad_token_id = hflm_model.model.generation_config.eos_token_id
+    
+    # This is the object that will be passed to simple_evaluate. It may be the wrapper.
+    lm_obj = hflm_model
     logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
     
+    # Apply think pattern post-processing wrapper if enabled
+    if args.postprocess_think_pattern:
+        logging.info(f"Enabling think pattern post-processing with patterns: '{args.think_start_pattern}' to '{args.think_end_pattern}'")
+        lm_obj = ThinkPatternPostprocessWrapper(
+            hflm_model, 
+            start_pattern=args.think_start_pattern,
+            end_pattern=args.think_end_pattern
+        )
+
     if args.analyse:
-        analyser = Analyser(lm_obj.model)
+        # The Analyser always needs the underlying HFLM instance to attach hooks.
+        analyser = Analyser(hflm_model)
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)

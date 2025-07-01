@@ -71,6 +71,8 @@ def parse_args():
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine_with_min_lr",)
     parser.add_argument("--num_warmup_steps", type=int, default=0,)
     parser.add_argument("--max_train_steps", type=int, default=5,)
+    parser.add_argument("--num_train_epochs", type=int, default=None, help="Number of epochs to train for. Overrides max_train_steps if specified.")
+    parser.add_argument("--max_steps_per_epoch", type=int, default=None, help="Maximum steps per epoch for streaming datasets")
     parser.add_argument("--checkpointing_steps", type=int, default=-1,)
     parser.add_argument("--with_tracking", action="store_true",)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,)
@@ -113,6 +115,79 @@ def calculate_loss(outputs, batch, model, sp_ulysses_vars):
     return loss, total_good_tokens
 
 
+def calculate_training_steps(args, train_dataloader, world_size):
+    """Calculate total training steps based on epochs or max_steps"""
+    if args.num_train_epochs is None:
+        # Use max_train_steps as before
+        return args.max_train_steps, args.max_train_steps
+    
+    # Calculate steps per epoch
+    if args.streaming_dataset or args.max_steps_per_epoch:
+        # For streaming datasets, use max_steps_per_epoch or a default
+        steps_per_epoch = args.max_steps_per_epoch or 1000
+        logger.info(f"Using {steps_per_epoch} steps per epoch for streaming dataset")
+    else:
+        # For non-streaming datasets, calculate from dataset size
+        try:
+            dataset_size = len(train_dataloader.dataset)
+            dp_world_size = world_size // args.sequence_parallel_size
+            global_batch_size = args.per_device_train_batch_size * dp_world_size * args.gradient_accumulation_steps
+            steps_per_epoch = math.ceil(dataset_size / global_batch_size)
+            logger.info(f"Calculated {steps_per_epoch} steps per epoch from dataset size {dataset_size}")
+        except (TypeError, AttributeError):
+            # Fallback for datasets without __len__
+            steps_per_epoch = args.max_steps_per_epoch or 1000
+            logger.warning(f"Could not determine dataset size, using {steps_per_epoch} steps per epoch")
+    
+    total_steps = steps_per_epoch * args.num_train_epochs
+    logger.info(f"Training for {args.num_train_epochs} epochs, {steps_per_epoch} steps per epoch, {total_steps} total steps")
+    
+    return total_steps, steps_per_epoch
+
+
+def create_deepspeed_config(args):
+    """Create DeepSpeed configuration with proper scheduler setup"""
+    
+    # calculate cosine minimum ratio if min_lr is set
+    cos_min_ratio = 0.0
+    if args.min_lr is not None and args.learning_rate > 0:
+        cos_min_ratio = args.min_lr / args.learning_rate
+
+    # Calculate total training steps for scheduler
+    total_steps = args.max_train_steps
+    if hasattr(args, '_calculated_max_steps'):
+        total_steps = args._calculated_max_steps
+
+    ds_config = {
+        "train_micro_batch_size_per_gpu": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "optimizer": { 
+            "type": "AdamW", 
+            "params": { 
+                "lr": args.learning_rate, 
+                "betas": [0.9, 0.95],
+                "weight_decay": args.weight_decay
+            } 
+        },
+        "scheduler": {
+            "type": "WarmupCosineLR",
+            "params": {
+                "total_num_steps": total_steps,
+                "warmup_num_steps": args.num_warmup_steps,
+                "warmup_min_ratio": 0.0,
+                "cos_min_ratio": cos_min_ratio,
+            }
+        },
+        "fp16": { "enabled": False },
+        "bf16": { "enabled": True },
+        "gradient_clipping": 1.0,
+        "zero_optimization": { "stage": args.zero_stage },
+        "sequence_parallel_size": args.sequence_parallel_size,
+    }
+    
+    return ds_config
+
+
 def main():
     args = parse_args()
     
@@ -129,13 +204,7 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
     
     # === Logging setup ===
-    # logging.basicConfig(
-    #     format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
-    #     datefmt="%m/%d/%Y %H:%M:%S",
-    #     level=logging.INFO,
-    # )
     logger.setLevel(logging.INFO)
-    # logger.info(f"Starting script on rank {dist.get_rank()}/{world_size}", main_process_only=False)
     logger.info(f"Starting script on rank {dist.get_rank()}/{world_size}")
 
     writer = None
@@ -193,6 +262,15 @@ def main():
         )
         train_dataloader = DataLoader(train_dataset, batch_size=args.per_device_train_batch_size)
 
+        # Calculate training steps based on epochs or max_steps
+        max_train_steps, steps_per_epoch = calculate_training_steps(args, train_dataloader, world_size)
+        args._calculated_max_steps = max_train_steps  # Store for DeepSpeed config
+        
+        # Override max_train_steps if using epochs
+        if args.num_train_epochs is not None:
+            args.max_train_steps = max_train_steps
+            logger.info(f"Overriding max_train_steps to {max_train_steps} based on {args.num_train_epochs} epochs")
+
     if args.validation_samples_from_train:
         validation_dataset = build_packed_sft_dataset(
             dataset_name=args.dataset_name_or_path,
@@ -225,17 +303,7 @@ def main():
     )
 
     # === DeepSpeed Initialization ===
-    ds_config = {
-        "train_micro_batch_size_per_gpu": args.per_device_train_batch_size,
-        "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "optimizer": { "type": "AdamW", "params": { "lr": args.learning_rate, "betas": [0.9, 0.95] } },
-        "scheduler": { "type": "WarmupLR", "params": { "warmup_min_lr": 0, "warmup_max_lr": args.learning_rate, "warmup_num_steps": args.num_warmup_steps } },
-        "fp16": { "enabled": False },
-        "bf16": { "enabled": True },
-        "gradient_clipping": 1.0,
-        "zero_optimization": { "stage": args.zero_stage },
-        "sequence_parallel_size": args.sequence_parallel_size,
-    }
+    ds_config = create_deepspeed_config(args)
 
     model, optimizer, _, lr_scheduler = deepspeed.initialize(
         model=model,
@@ -259,55 +327,98 @@ def main():
     
     # === Checkpoint Loading ===
     completed_steps = 0
+    current_epoch = 0
     if args.resume_from_checkpoint:
         _, client_state = model.load_checkpoint(args.resume_from_checkpoint)
-        if client_state is not None and 'step' in client_state:
-            completed_steps = client_state['step']
-            logger.info(f"Resumed from step {completed_steps} from checkpoint {args.resume_from_checkpoint}")
+        if client_state is not None:
+            if 'step' in client_state:
+                completed_steps = client_state['step']
+            if 'epoch' in client_state:
+                current_epoch = client_state['epoch']
+            logger.info(f"Resumed from step {completed_steps}, epoch {current_epoch} from checkpoint {args.resume_from_checkpoint}")
         else:
             logger.warning(f"Could not find step in client state from checkpoint {args.resume_from_checkpoint}")
 
     # === Training Loop ===
     if not args.skip_train:
         logger.info("***** Running training *****")
+        if args.num_train_epochs is not None:
+            logger.info(f"Training for {args.num_train_epochs} epochs, starting from epoch {current_epoch}")
+            logger.info(f"Steps per epoch: {steps_per_epoch}")
+        else:
+            logger.info(f"Training for {args.max_train_steps} steps")
+        
         progress_bar = tqdm(range(completed_steps, args.max_train_steps), disable=not is_main_process)
         model.train()
 
-        active_dataloader = train_dataloader
-        if completed_steps > 0:
-            # Skip batches in the dataloader if resuming
-            logger.info(f"Skipping {completed_steps * args.gradient_accumulation_steps} batches to resume training.")
-            active_dataloader = islice(train_dataloader, completed_steps * args.gradient_accumulation_steps, None)
-
-        for step, batch in enumerate(active_dataloader):
-            batch = move_to_device(batch, device)
-            outputs = model(**batch)
-            loss, num_good_tokens = calculate_loss(outputs, batch, model, sp_ulysses_vars)
+        accumulation_step = 0
+        
+        # Multi-epoch training loop
+        for epoch in range(current_epoch, args.num_train_epochs if args.num_train_epochs else current_epoch + 1):
+            if args.num_train_epochs is not None:
+                logger.info(f"Starting epoch {epoch + 1}/{args.num_train_epochs}")
             
-            model.backward(loss)
-            model.step()
-
-            progress_bar.update(1)
-            completed_steps += 1
+            active_dataloader = train_dataloader
             
-            if writer:
-                writer.add_scalar("loss/train", loss.item(), completed_steps)
-                writer.add_scalar("lr", lr_scheduler.get_last_lr()[0], completed_steps)
-                if sp_ulysses_vars is None:
-                    # Only log token count if not using SP, as SP already aggregates
-                    writer.add_scalar("good_tokens/train", num_good_tokens.item(), completed_steps)
+            # Handle resuming within an epoch
+            if epoch == current_epoch and completed_steps > 0:
+                batches_to_skip = (completed_steps - epoch * steps_per_epoch) * args.gradient_accumulation_steps
+                if batches_to_skip > 0:
+                    logger.info(f"Skipping {batches_to_skip} batches to resume training within epoch {epoch + 1}")
+                    active_dataloader = islice(train_dataloader, batches_to_skip, None)
+            
+            epoch_step = 0
+            for batch_idx, batch in enumerate(active_dataloader):
+                batch = move_to_device(batch, device)
+                outputs = model(**batch)
+                loss, num_good_tokens = calculate_loss(outputs, batch, model, sp_ulysses_vars)
+                
+                # Scale loss by gradient accumulation steps
+                loss = loss / args.gradient_accumulation_steps
+                
+                model.backward(loss)
+                accumulation_step += 1
+                
+                # Only step and zero grad every gradient_accumulation_steps
+                if accumulation_step % args.gradient_accumulation_steps == 0:
+                    model.step()
+                    model.optimizer.zero_grad()
+                    
+                    progress_bar.update(1)
+                    completed_steps += 1
+                    epoch_step += 1
+                    accumulation_step = 0
+                    
+                    if writer:
+                        # Log the unscaled loss for monitoring
+                        writer.add_scalar("loss/train", (loss * args.gradient_accumulation_steps).item(), completed_steps)
+                        writer.add_scalar("lr", lr_scheduler.get_last_lr()[0], completed_steps)
+                        writer.add_scalar("epoch", epoch + (epoch_step / steps_per_epoch), completed_steps)
+                        if sp_ulysses_vars is None:
+                            writer.add_scalar("good_tokens/train", num_good_tokens.item(), completed_steps)
 
-            if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
-                ckpt_dir = os.path.join(args.output_dir, f"step_{completed_steps}")
-                model.save_checkpoint(ckpt_dir, client_state={'step': completed_steps})
+                    if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
+                        ckpt_dir = os.path.join(args.output_dir, f"step_{completed_steps}")
+                        model.save_checkpoint(ckpt_dir, client_state={'step': completed_steps, 'epoch': epoch})
 
-            if completed_steps % args.evaluate_every == 0:
-                if validation_dataset is not None:
-                    evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, writer, is_main_process)
-                else:
-                    logger.info(f"Skipping evaluation at step {completed_steps} as no validation set is configured.")
-                model.train() # Switch back to train mode
+                    if completed_steps % args.evaluate_every == 0:
+                        if validation_dataset is not None:
+                            evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, writer, is_main_process)
+                        else:
+                            logger.info(f"Skipping evaluation at step {completed_steps} as no validation set is configured.")
+                        model.train()
 
+                    if completed_steps >= args.max_train_steps:
+                        break
+                
+                # For streaming datasets, break after max_steps_per_epoch if specified
+                if args.streaming_dataset and args.max_steps_per_epoch and epoch_step >= args.max_steps_per_epoch:
+                    logger.info(f"Reached max_steps_per_epoch ({args.max_steps_per_epoch}) for epoch {epoch + 1}")
+                    break
+            
+            if args.num_train_epochs is not None:
+                logger.info(f"Completed epoch {epoch + 1}/{args.num_train_epochs}, steps: {epoch_step}")
+            
             if completed_steps >= args.max_train_steps:
                 break
     
@@ -378,4 +489,4 @@ def evaluate(args, model, validation_dataset, sp_ulysses_vars, completed_steps, 
 
 
 if __name__ == "__main__":
-    main() 
+    main()
