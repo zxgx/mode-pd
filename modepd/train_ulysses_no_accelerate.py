@@ -169,15 +169,6 @@ def create_deepspeed_config(args):
                 "weight_decay": args.weight_decay
             } 
         },
-        "scheduler": {
-            "type": "WarmupCosineLR",
-            "params": {
-                "total_num_steps": total_steps,
-                "warmup_num_steps": args.num_warmup_steps,
-                "warmup_min_ratio": 0.0,
-                "cos_min_ratio": cos_min_ratio,
-            }
-        },
         "fp16": { "enabled": False },
         "bf16": { "enabled": True },
         "gradient_clipping": 1.0,
