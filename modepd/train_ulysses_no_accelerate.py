@@ -161,6 +161,23 @@ def create_deepspeed_config(args):
     ds_config = {
         "train_micro_batch_size_per_gpu": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "optimizer": {
+            "type": "AdamW", 
+            "params": { 
+                "lr": args.learning_rate, 
+                "betas": [0.9, 0.95],
+                "weight_decay": args.weight_decay
+            } 
+        },
+        "scheduler": {
+            "type": "WarmupCosineLR",
+            "params": {
+                "total_num_steps": total_steps,
+                "warmup_num_steps": args.num_warmup_steps,
+                "warmup_min_ratio": 0.0,
+                "cos_min_ratio": cos_min_ratio,
+            }
+        },
         "fp16": { "enabled": False },
         "bf16": { "enabled": True },
         "gradient_clipping": 1.0,
@@ -265,34 +282,13 @@ def main():
             block_size=args.block_size,
             num_validation_samples=args.validation_samples_from_train
         )
-    
-    # === Optimizer and Scheduler ===
-    no_decay = ["bias", "layer_norm.weight"]
-    optimizer_grouped_parameters = [
-        {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay) and p.requires_grad], "weight_decay": args.weight_decay},
-        {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad], "weight_decay": 0.0},
-    ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=[0.9, 0.95])
-    
-    scheduler_specific_kwargs = {}
-    if args.min_lr is not None:
-        scheduler_specific_kwargs["min_lr"] = args.min_lr
-    lr_scheduler = get_scheduler(
-        name=args.lr_scheduler_type,
-        optimizer=optimizer,
-        num_warmup_steps=args.num_warmup_steps,
-        num_training_steps=args.max_train_steps,
-        scheduler_specific_kwargs=scheduler_specific_kwargs,
-    )
 
     # === DeepSpeed Initialization ===
     ds_config = create_deepspeed_config(args)
 
     model, optimizer, _, lr_scheduler = deepspeed.initialize(
         model=model,
-        optimizer=optimizer,
         config=ds_config,
-        lr_scheduler=lr_scheduler,
         dist_init_required=True,
         mpu=mpu
     )
@@ -334,6 +330,9 @@ def main():
         progress_bar = tqdm(range(completed_steps, args.max_train_steps), disable=not is_main_process)
         model.train()
 
+        if args.with_tracking:
+            step_loss = torch.zeros(1, device=model.device, dtype=torch.float)
+
         accumulation_step = 0
         any_good_tokens_in_accumulation = False
         
@@ -359,27 +358,15 @@ def main():
                 
                 if num_good_tokens > 0:
                     any_good_tokens_in_accumulation = True
-
-                # Scale loss by gradient accumulation steps
-                loss = loss / args.gradient_accumulation_steps
                 
-                model.backward(loss)
+                loss = model.backward(loss)
+                model.step()
                 accumulation_step += 1
+                if args.with_tracking:
+                    step_loss += loss.detach().float()
                 
-                # Only step and zero grad every gradient_accumulation_steps
                 if accumulation_step % args.gradient_accumulation_steps == 0:
-                    if any_good_tokens_in_accumulation:
-                        model.step()
-                    else:
-                        # We are skipping the step, but still need to zero the gradients
-                        logger.info(f"Skipping optimizer step at step {completed_steps} because no good tokens were seen in this accumulation period.")
-                    
-                    model.optimizer.zero_grad()
-                    lr_scheduler.step()
-                    
-                    # Reset for the next accumulation window and update progress
-                    any_good_tokens_in_accumulation = False
-                    
+
                     progress_bar.update(1)
                     completed_steps += 1
                     epoch_step += 1
@@ -387,11 +374,12 @@ def main():
                     
                     if writer:
                         # Log the unscaled loss for monitoring
-                        writer.add_scalar("loss/train", (loss * args.gradient_accumulation_steps).item(), completed_steps)
+                        writer.add_scalar("loss/train", (step_loss).item(), completed_steps)
                         writer.add_scalar("lr", lr_scheduler.get_last_lr()[0], completed_steps)
                         writer.add_scalar("epoch", epoch + (epoch_step / steps_per_epoch), completed_steps)
                         if sp_ulysses_vars is None:
                             writer.add_scalar("good_tokens/train", num_good_tokens.item(), completed_steps)
+                        step_loss.zero_()
 
                     if args.checkpointing_steps > 0 and completed_steps % args.checkpointing_steps == 0:
                         ckpt_dir = os.path.join(args.output_dir, f"step_{completed_steps}")
