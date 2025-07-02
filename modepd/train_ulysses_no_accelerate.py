@@ -334,7 +334,6 @@ def main():
             step_loss = torch.zeros(1, device=model.device, dtype=torch.float)
 
         accumulation_step = 0
-        any_good_tokens_in_accumulation = False
         
         # Multi-epoch training loop
         for epoch in range(current_epoch, args.num_train_epochs if args.num_train_epochs else current_epoch + 1):
@@ -355,9 +354,6 @@ def main():
                 batch = move_to_device(batch, device)
                 outputs = model(**batch)
                 loss, num_good_tokens = calculate_loss(outputs, batch, model, sp_ulysses_vars)
-                
-                if num_good_tokens > 0:
-                    any_good_tokens_in_accumulation = True
                 
                 loss = model.backward(loss)
                 model.step()
