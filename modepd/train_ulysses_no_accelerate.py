@@ -343,6 +343,7 @@ def main():
         model.train()
 
         accumulation_step = 0
+        any_good_tokens_in_accumulation = False
         
         # Multi-epoch training loop
         for epoch in range(current_epoch, args.num_train_epochs if args.num_train_epochs else current_epoch + 1):
@@ -364,6 +365,9 @@ def main():
                 outputs = model(**batch)
                 loss, num_good_tokens = calculate_loss(outputs, batch, model, sp_ulysses_vars)
                 
+                if num_good_tokens > 0:
+                    any_good_tokens_in_accumulation = True
+
                 # Scale loss by gradient accumulation steps
                 loss = loss / args.gradient_accumulation_steps
                 
@@ -372,8 +376,16 @@ def main():
                 
                 # Only step and zero grad every gradient_accumulation_steps
                 if accumulation_step % args.gradient_accumulation_steps == 0:
-                    model.step()
+                    if any_good_tokens_in_accumulation:
+                        model.step()
+                    else:
+                        # We are skipping the step, but still need to zero the gradients
+                        logger.info(f"Skipping optimizer step at step {completed_steps} because no good tokens were seen in this accumulation period.")
+                    
                     model.optimizer.zero_grad()
+                    
+                    # Reset for the next accumulation window and update progress
+                    any_good_tokens_in_accumulation = False
                     
                     progress_bar.update(1)
                     completed_steps += 1

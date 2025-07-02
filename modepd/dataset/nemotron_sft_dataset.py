@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHAT_TEMPLATE = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|system|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\n'  + message['content'] + eos_token }}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}{% endfor %}"
 
 
-def _format_and_tokenize(example, tokenizer):
+def _format_and_tokenize(example, tokenizer, block_size=None):
     """
     Formats a single SFT example using the tokenizer's chat template,
     tokenizes it, and creates labels with prompt masking.
@@ -43,6 +43,13 @@ def _format_and_tokenize(example, tokenizer):
         tokenize=True, 
         add_special_tokens=False
     )
+
+    if block_size is not None and len(prompt_tokens) >= block_size:
+        logger.warning(
+            f"Encountered a prompt that is longer than or equal to the block size "
+            f"({len(prompt_tokens)} >= {block_size}). This will result in at least one batch "
+            "with no labels to compute loss on."
+        )
 
     # 4. Apply the chat template to the full conversation.
     full_messages = prompt_messages + [{"role": "assistant", "content": response_str}]
@@ -100,7 +107,7 @@ class PackedSFTDataset(IterableDataset):
         buffer_labels = []
 
         for example in raw_dataset:
-            input_ids, labels = _format_and_tokenize(example, self.tokenizer)
+            input_ids, labels = _format_and_tokenize(example, self.tokenizer, self.block_size)
             if input_ids is None:
                 continue
             
