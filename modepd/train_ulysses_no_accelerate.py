@@ -375,6 +375,7 @@ def main():
                         logger.info(f"Skipping optimizer step at step {completed_steps} because no good tokens were seen in this accumulation period.")
                     
                     model.optimizer.zero_grad()
+                    lr_scheduler.step()
                     
                     # Reset for the next accumulation window and update progress
                     any_good_tokens_in_accumulation = False
