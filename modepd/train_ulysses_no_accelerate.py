@@ -161,14 +161,6 @@ def create_deepspeed_config(args):
     ds_config = {
         "train_micro_batch_size_per_gpu": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "optimizer": { 
-            "type": "AdamW", 
-            "params": { 
-                "lr": args.learning_rate, 
-                "betas": [0.9, 0.95],
-                "weight_decay": args.weight_decay
-            } 
-        },
         "fp16": { "enabled": False },
         "bf16": { "enabled": True },
         "gradient_clipping": 1.0,
@@ -288,8 +280,8 @@ def main():
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
-        num_warmup_steps=args.num_warmup_steps * world_size,
-        num_training_steps=args.max_train_steps * world_size,
+        num_warmup_steps=args.num_warmup_steps,
+        num_training_steps=args.max_train_steps,
         scheduler_specific_kwargs=scheduler_specific_kwargs,
     )
 
