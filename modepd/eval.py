@@ -129,12 +129,13 @@ def load_model_from_checkpoint(model_name_or_path, checkpoint_dir, checkpoint_ta
     # Load tokenizer and config from original model
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
     
-    # Initialize model with original config
+    # Initialize model with original config - don't set device_map yet
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=True,
         torch_dtype=dtype,
-        device_map="cpu"  # Load on CPU first
+        device_map=None,  # Don't set device_map, we'll handle device placement manually
+        low_cpu_mem_usage=True
     )
     
     # Load checkpoint weights
@@ -167,7 +168,7 @@ def load_model_from_checkpoint(model_name_or_path, checkpoint_dir, checkpoint_ta
         logging.info(f"Loading checkpoint file: {ckpt_path}")
         
         if ckpt_file.endswith('.safetensors'):
-            ckpt_state_dict = load_file(ckpt_path)
+            ckpt_state_dict = load_file(ckpt_path, device="cpu")
         else:
             ckpt_state_dict = torch.load(ckpt_path, map_location='cpu')
         
@@ -448,18 +449,28 @@ def main():
             args.dtype
         )
         
+        # Move model to GPU before passing to HFLM
+        if not args.model_parallel:
+            model.cuda()
+
+        # For checkpoint loading, we need to handle device placement manually
+        # Remove device_map from model_kwargs since we'll handle it ourselves
+        checkpoint_model_kwargs = {k: v for k, v in model_kwargs.items() if k != "device_map"}
+        
         # Create HFLM instance with loaded model
         hflm_model = HFLM(
             pretrained=model,
             tokenizer=tokenizer,
             parallelize=args.model_parallel, 
-            **model_kwargs
+            **checkpoint_model_kwargs
         )
+        
+        
     else:
         # Original behavior - load from HF model hub
         hflm_model = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
+        hflm_model.model.cuda()
     
-    hflm_model.model.cuda()
     hflm_model.model.config.use_cache = True
     hflm_model.model.generation_config.use_cache = True
     if "DeepSeek-V2" in hf_model:
