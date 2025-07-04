@@ -17,6 +17,10 @@ from lm_eval.models.huggingface import HFLM
 from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MLP
 from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MLP
 
+# Add these imports for checkpoint loading
+from safetensors.torch import load_file
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
 logging.basicConfig(
     format="%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
     datefmt="%Y-%m-%d:%H:%M:%S",
@@ -43,6 +47,13 @@ def get_args():
     parser.add_argument("--dtype", type=torch.dtype, default=torch.bfloat16)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--model_parallel", action="store_true")
+    
+    # Add checkpoint loading arguments
+    parser.add_argument("--checkpoint_dir", type=str, default=None, 
+                       help="Directory containing DeepSpeed checkpoint (e.g., step_100)")
+    parser.add_argument("--checkpoint_tag", type=str, default=None,
+                       help="DeepSpeed checkpoint tag (usually the step number)")
+    
     # lm_eval config
     parser.add_argument(
         "--tasks", type=str, nargs='+',
@@ -97,6 +108,93 @@ def get_args():
     )
 
     return parser.parse_args()
+
+
+def load_model_from_checkpoint(model_name_or_path, checkpoint_dir, checkpoint_tag=None, dtype=torch.bfloat16):
+    """
+    Load model from DeepSpeed checkpoint directory.
+    
+    Args:
+        model_name_or_path: Original model name or path (for tokenizer and config)
+        checkpoint_dir: Path to DeepSpeed checkpoint directory
+        checkpoint_tag: Optional checkpoint tag (step number)
+        dtype: Model dtype
+    
+    Returns:
+        model: Loaded model with checkpoint weights
+        tokenizer: Tokenizer from original model
+    """
+    logging.info(f"Loading model from checkpoint: {checkpoint_dir}")
+    
+    # Load tokenizer and config from original model
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+    
+    # Initialize model with original config
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+        device_map="cpu"  # Load on CPU first
+    )
+    
+    # Load checkpoint weights
+    checkpoint_files = []
+    if checkpoint_tag:
+        # Look for specific checkpoint tag
+        mp_rank_files = [f for f in os.listdir(checkpoint_dir) if f.startswith(f"mp_rank_{checkpoint_tag}")]
+    else:
+        # Look for any checkpoint files
+        mp_rank_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("mp_rank")]
+    
+    if not mp_rank_files:
+        # Try to find safetensors or pytorch_model files
+        safetensor_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.safetensors')]
+        pytorch_files = [f for f in os.listdir(checkpoint_dir) if f.startswith('pytorch_model') and f.endswith('.bin')]
+        
+        if safetensor_files:
+            checkpoint_files = safetensor_files
+        elif pytorch_files:
+            checkpoint_files = pytorch_files
+        else:
+            raise FileNotFoundError(f"No checkpoint files found in {checkpoint_dir}")
+    else:
+        checkpoint_files = mp_rank_files
+    
+    # Load state dict from checkpoint
+    state_dict = {}
+    for ckpt_file in checkpoint_files:
+        ckpt_path = os.path.join(checkpoint_dir, ckpt_file)
+        logging.info(f"Loading checkpoint file: {ckpt_path}")
+        
+        if ckpt_file.endswith('.safetensors'):
+            ckpt_state_dict = load_file(ckpt_path)
+        else:
+            ckpt_state_dict = torch.load(ckpt_path, map_location='cpu')
+        
+        # Handle different checkpoint formats
+        if 'module' in ckpt_state_dict:
+            # DeepSpeed format
+            for key, value in ckpt_state_dict['module'].items():
+                state_dict[key] = value
+        elif 'model_state_dict' in ckpt_state_dict:
+            # Standard PyTorch format
+            for key, value in ckpt_state_dict['model_state_dict'].items():
+                state_dict[key] = value
+        else:
+            # Direct state dict
+            for key, value in ckpt_state_dict.items():
+                state_dict[key] = value
+    
+    # Load state dict into model
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    
+    if missing_keys:
+        logging.warning(f"Missing keys when loading checkpoint: {missing_keys}")
+    if unexpected_keys:
+        logging.warning(f"Unexpected keys when loading checkpoint: {unexpected_keys}")
+    
+    logging.info(f"Successfully loaded model from checkpoint: {checkpoint_dir}")
+    return model, tokenizer
 
 
 class Analyser:
@@ -340,8 +438,27 @@ def main():
         "confirm_run_unsafe_code": True,
     }
     
-    # The HFLM instance that lm-eval can work with.
-    hflm_model = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
+    # Check if we need to load from checkpoint
+    if args.checkpoint_dir:
+        # Load model from checkpoint
+        model, tokenizer = load_model_from_checkpoint(
+            hf_model, 
+            args.checkpoint_dir, 
+            args.checkpoint_tag,
+            args.dtype
+        )
+        
+        # Create HFLM instance with loaded model
+        hflm_model = HFLM(
+            pretrained=model,
+            tokenizer=tokenizer,
+            parallelize=args.model_parallel, 
+            **model_kwargs
+        )
+    else:
+        # Original behavior - load from HF model hub
+        hflm_model = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
+    
     hflm_model.model.cuda()
     hflm_model.model.config.use_cache = True
     hflm_model.model.generation_config.use_cache = True
