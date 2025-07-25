@@ -18,6 +18,10 @@ from modepd.model.moonshotai.tokenization_moonshot import TikTokenTokenizer
 from modepd.model.olmoe.configuration_olmoe import OlmoneConfig
 from modepd.model.olmoe.modeling_olmoe import OlmoneModel, OlmoneForCausalLM
 from modepd.dataset.olmoe_dataset import load_olmoe_mix_dataset
+from modepd.model.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
+from modepd.model.qwen2_moe.modeling_qwen2_moe import Qwen2MoeModel, Qwen2MoeForCausalLM
+from modepd.model.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+from modepd.model.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel, Qwen3MoeForCausalLM
 
 GB = 1024**3
 
@@ -28,13 +32,21 @@ def register_custom_model():
     AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
 
     AutoConfig.register("deepseek_v3_compressed", DeepseekV3Config)
-    AutoModel.register(DeepseekV3Config, DeepseekV3Model)
-    AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM)
-    AutoTokenizer.register(DeepseekV3Config, TikTokenTokenizer)
+    AutoModel.register(DeepseekV3Config, DeepseekV3Model, exist_ok=True)
+    AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM, exist_ok=True)
+    AutoTokenizer.register(DeepseekV3Config, TikTokenTokenizer, exist_ok=True)
 
     AutoConfig.register("olmoe_compressed", OlmoneConfig)
     AutoModel.register(OlmoneConfig, OlmoneModel)
     AutoModelForCausalLM.register(OlmoneConfig, OlmoneForCausalLM)
+
+    AutoConfig.register("qwen2_moe_compressed", Qwen2MoeConfig)
+    AutoModel.register(Qwen2MoeConfig, Qwen2MoeModel, exist_ok=True)
+    AutoModelForCausalLM.register(Qwen2MoeConfig, Qwen2MoeForCausalLM, exist_ok=True)
+
+    AutoConfig.register("qwen3_moe_compressed", Qwen3MoeConfig)
+    AutoModel.register(Qwen3MoeConfig, Qwen3MoeModel, exist_ok=True)
+    AutoModelForCausalLM.register(Qwen3MoeConfig, Qwen3MoeForCausalLM, exist_ok=True)
 
 
 def prepare_model_and_tokenizer(model_name_or_path, mode='train', use_cache=False):
