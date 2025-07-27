@@ -4,12 +4,13 @@ import logging
 from tqdm import tqdm
 
 import torch
-from torch import nn
 from transformers import AutoModelForCausalLM
 
 from modepd.model.deepseek_v2.modeling_deepseek import DeepseekV2MoE, DeepseekV2MLP
 from modepd.model.moonshotai.modeling_deepseek import DeepseekV3MoE, DeepseekV3MLP
 from modepd.model.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
+from modepd.model.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
+from modepd.model.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
 
 @torch.no_grad()
@@ -106,9 +107,6 @@ def weight_prune_by_flap(args, model, train_dataloader):
 
     handles = []
     num_layer = model.config.num_hidden_layers
-    routed_intermediate_indices, shared_intermediate_indices = {}, {}
-    # new config content
-    routed_intermediate_sizes, shared_intermediate_sizes = {}, {}
 
     bias_stats = {}
     def create_hook(linear_name):
@@ -153,7 +151,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
             
             handle = mlp.down_proj.register_forward_hook(create_hook(module_name))
             handles.append(handle)
-        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock)):
+        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock, Qwen2MoeSparseMoeBlock, Qwen3MoeSparseMoeBlock)):
             num_experts = len(mlp.experts)
             for e_i in range(num_experts):
                 inp_dim_size = mlp.experts[e_i].down_proj.weight.shape[1]
@@ -176,6 +174,17 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 }
 
                 handle = mlp.shared_experts.down_proj.register_forward_hook(create_hook(shared_module_name))
+                handles.append(handle)
+            elif isinstance(mlp, Qwen2MoeSparseMoeBlock):
+                shared_inp_dim_size = mlp.shared_expert.down_proj.weight.shape[1]
+                shared_module_name = f"layers.{i}.mlp.shared_experts"
+                bias_stats[shared_module_name] = {
+                    "baseline_inp": torch.zeros(shared_inp_dim_size, device=device),
+                    "fluc_inp": torch.zeros(shared_inp_dim_size, device=device),
+                    "num_samples": 0
+                }
+
+                handle = mlp.shared_expert.down_proj.register_forward_hook(create_hook(shared_module_name))
                 handles.append(handle)
         else:
             raise ValueError(f"unknow mlp type: {type(mlp)} at layer {i}")
@@ -200,7 +209,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
             dense_baseline_list.append(
                 bias_stats[module_name]["baseline_inp"]
             )
-        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock)):
+        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock, Qwen2MoeSparseMoeBlock, Qwen3MoeSparseMoeBlock)):
             num_experts = len(mlp.experts)
             for e_i in range(num_experts):
                 module_name = f"layers.{i}.mlp.experts.{e_i}"
@@ -214,6 +223,14 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 shared_module_name = f"layers.{i}.mlp.shared_experts"
                 shared_fluc_metric_list.append(
                     bias_stats[shared_module_name]["fluc_inp"] * torch.sum(mlp.shared_experts.down_proj.weight.data.pow(2), dim=0)
+                )
+                shared_baseline_list.append(
+                    bias_stats[shared_module_name]["baseline_inp"]
+                )
+            elif isinstance(mlp, Qwen2MoeSparseMoeBlock):
+                shared_module_name = f"layers.{i}.mlp.shared_experts"
+                shared_fluc_metric_list.append(
+                    bias_stats[shared_module_name]["fluc_inp"] * torch.sum(mlp.shared_expert.down_proj.weight.data.pow(2), dim=0)
                 )
                 shared_baseline_list.append(
                     bias_stats[shared_module_name]["baseline_inp"]
@@ -233,6 +250,9 @@ def weight_prune_by_flap(args, model, train_dataloader):
         fluc_metric.append(dense_fluc_metric.view(-1))
         shared_fluc_metric = standarlization(torch.stack(shared_fluc_metric_list))
         fluc_metric.append(shared_fluc_metric.view(-1))
+    elif isinstance(mlp, Qwen2MoeSparseMoeBlock):
+        shared_fluc_metric = standarlization(torch.stack(shared_fluc_metric_list))
+        fluc_metric.append(shared_fluc_metric.view(-1))
 
     fluc_metric = torch.cat(fluc_metric)
     sorted_prune, _ = torch.sort(fluc_metric, descending=True)
@@ -240,6 +260,8 @@ def weight_prune_by_flap(args, model, train_dataloader):
     expert_mask = expert_fluc_metric > threshold
     if isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE)):
         dense_mask = dense_fluc_metric > threshold
+        shared_mask = shared_fluc_metric > threshold
+    elif isinstance(mlp, Qwen2MoeSparseMoeBlock):
         shared_mask = shared_fluc_metric > threshold
 
     dense_offset, expert_offset, shared_offset = 0, 0, 0
@@ -270,7 +292,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
             flap_intermediate_sizes[i] = valid_channels
             dense_offset += 1
 
-        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock)):
+        elif isinstance(mlp, (DeepseekV2MoE, DeepseekV3MoE, OlmoeSparseMoeBlock, Qwen2MoeSparseMoeBlock, Qwen3MoeSparseMoeBlock)):
             num_experts = len(mlp.experts)
             flap_intermediate_sizes[i] = {
                 "routed": [],
@@ -294,7 +316,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 output_bias = (expert_baseline_list[expert_offset] * ~weight_mask) @ mlp.experts[e_i].down_proj.weight.t().float()
                 nan_count = torch.isnan(output_bias).sum()
                 if nan_count > 0:
-                    logging.warn(f"layer {i} expert {e_i} bias has {nan_count} NaN elements, valid channels: {valid_channels}")
+                    logging.warning(f"layer {i} expert {e_i} bias has {nan_count} NaN elements, valid channels: {valid_channels}")
                 mlp.experts[e_i].down_proj.weight.data = mlp.experts[e_i].down_proj.weight.data[:, weight_mask]
                 mlp.experts[e_i].down_proj.bias = torch.nn.Parameter(output_bias.to(dtype=mlp.experts[e_i].down_proj.weight.dtype))
                 mlp.experts[e_i].down_proj.in_features = valid_channels
@@ -306,7 +328,7 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 weight_mask = shared_mask[shared_offset]
                 valid_channels = torch.sum(weight_mask).item()
                 if valid_channels == 0:
-                    logging.warn(f"layer {i}'s shared experts of the MoE layer should have been fully pruned. We leave one channel for the sake of compatibility")
+                    logging.warning(f"layer {i}'s shared experts of the MoE layer should have been fully pruned. We leave one channel for the sake of compatibility")
                     weight_mask[torch.argmax(shared_fluc_metric[shared_offset])] = True
                     valid_channels = 1
 
@@ -321,6 +343,29 @@ def weight_prune_by_flap(args, model, train_dataloader):
                 mlp.shared_experts.down_proj.weight.data = mlp.shared_experts.down_proj.weight.data[:, weight_mask]
                 mlp.shared_experts.down_proj.bias = torch.nn.Parameter(output_bias.to(dtype=mlp.shared_experts.down_proj.weight.dtype))
                 mlp.shared_experts.down_proj.in_features = valid_channels
+
+                # update config
+                flap_intermediate_sizes[i]["shared"] = valid_channels
+                shared_offset += 1
+            elif isinstance(mlp, Qwen2MoeSparseMoeBlock):
+                weight_mask = shared_mask[shared_offset]
+                valid_channels = torch.sum(weight_mask).item()
+                if valid_channels == 0:
+                    logging.warning(f"layer {i}'s shared experts of the MoE layer should have been fully pruned. We leave one channel for the sake of compatibility")
+                    weight_mask[torch.argmax(shared_fluc_metric[shared_offset])] = True
+                    valid_channels = 1
+
+                # prune weight
+                mlp.shared_expert.up_proj.weight.data = mlp.shared_expert.up_proj.weight.data[weight_mask]
+                mlp.shared_expert.up_proj.out_features = valid_channels
+                mlp.shared_expert.gate_proj.weight.data = mlp.shared_expert.gate_proj.weight.data[weight_mask]
+                mlp.shared_expert.gate_proj.out_features = valid_channels
+                
+                # attach bias
+                output_bias = (shared_baseline_list[shared_offset] * ~weight_mask) @ mlp.shared_expert.down_proj.weight.t().float()
+                mlp.shared_expert.down_proj.weight.data = mlp.shared_expert.down_proj.weight.data[:, weight_mask]
+                mlp.shared_expert.down_proj.bias = torch.nn.Parameter(output_bias.to(dtype=mlp.shared_expert.down_proj.weight.dtype))
+                mlp.shared_expert.down_proj.in_features = valid_channels
 
                 # update config
                 flap_intermediate_sizes[i]["shared"] = valid_channels

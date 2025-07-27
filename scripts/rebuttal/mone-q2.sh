@@ -4,7 +4,7 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -k oed
-#PBS -o mone-prune.log 
+#PBS -o mone-prune-q2.log 
 
 cd $PBS_O_WORKDIR; 
 echo "JOB ID: $PBS_JOBID, pwd: $PWD, pbs workdir: $PBS_O_WORKDIR"

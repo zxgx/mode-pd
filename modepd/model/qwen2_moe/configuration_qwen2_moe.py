@@ -14,9 +14,9 @@
 # limitations under the License.
 """Qwen2MoE model configuration"""
 
-from ...configuration_utils import PretrainedConfig
-from ...modeling_rope_utils import rope_config_validation
-from ...utils import logging
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_rope_utils import rope_config_validation
+from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)
@@ -197,6 +197,11 @@ class Qwen2MoeConfig(PretrainedConfig):
         router_aux_loss_coef=0.001,
         mlp_only_layers=None,
         qkv_bias=True,
+        routed_intermediate_sizes=None,
+        shared_intermediate_sizes=None,
+        flap_intermediate_sizes=None,
+        approximate_experts=None,
+        approximate_expert_init_tokens=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -228,12 +233,31 @@ class Qwen2MoeConfig(PretrainedConfig):
         self.moe_intermediate_size = moe_intermediate_size
         self.shared_expert_intermediate_size = shared_expert_intermediate_size
         self.num_experts_per_tok = num_experts_per_tok
+        if isinstance(num_experts, dict):
+            num_experts = {int(k): v for k, v in num_experts.items()}
         self.num_experts = num_experts
         self.norm_topk_prob = norm_topk_prob
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.mlp_only_layers = [] if mlp_only_layers is None else mlp_only_layers
         self.qkv_bias = qkv_bias
+
+        if routed_intermediate_sizes is not None:
+            routed_intermediate_sizes = {int(k): v for k, v in routed_intermediate_sizes.items()}
+        self.routed_intermediate_sizes = routed_intermediate_sizes
+        if shared_intermediate_sizes is not None:
+            shared_intermediate_sizes = {int(k): v for k, v in shared_intermediate_sizes.items()}
+        self.shared_intermediate_sizes = shared_intermediate_sizes
+
+        if flap_intermediate_sizes is not None:
+            flap_intermediate_sizes = {int(k): v for k, v in flap_intermediate_sizes.items()}
+        self.flap_intermediate_sizes = flap_intermediate_sizes
+        
+        if approximate_experts is not None:
+            approximate_experts = {int(k): v for k, v in approximate_experts.items()}
+            approximate_expert_init_tokens = {int(k): v for k, v in approximate_expert_init_tokens.items()}
+        self.approximate_experts = approximate_experts
+        self.approximate_expert_init_tokens = approximate_expert_init_tokens
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

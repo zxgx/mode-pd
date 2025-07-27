@@ -51,6 +51,7 @@ def register_custom_model():
 
 def prepare_model_and_tokenizer(model_name_or_path, mode='train', use_cache=False):
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    
     causal_model_class = AutoModelForCausalLM
     if "DeepSeek-V2" in model_name_or_path and mode == 'prune':
         causal_model_class = DeepseekV2ForCausalLM
@@ -58,6 +59,13 @@ def prepare_model_and_tokenizer(model_name_or_path, mode='train', use_cache=Fals
         causal_model_class = DeepseekV3ForCausalLM
     elif "OLMoE" in model_name_or_path and mode == 'prune':
         causal_model_class = OlmoneForCausalLM
+    elif "Qwen2" in model_name_or_path and mode == 'prune':
+        causal_model_class = Qwen2MoeForCausalLM
+    elif "Qwen3" in model_name_or_path and mode == 'prune':
+        causal_model_class = Qwen3MoeForCausalLM
+    elif mode == 'prune':
+        raise ValueError(f"Unsupported model {model_name_or_path} for pruning mode.")
+
     model = causal_model_class.from_pretrained(
         model_name_or_path, torch_dtype=torch.bfloat16, use_cache=use_cache, 
         trust_remote_code=True, attn_implementation="flash_attention_2",

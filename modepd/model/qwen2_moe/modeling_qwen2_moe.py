@@ -21,38 +21,39 @@
 
 import math
 from typing import Optional, Union
+from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
-from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import AttentionMaskConverter
-from ...modeling_flash_attention_utils import flash_attn_supports_top_left_mask, is_flash_attn_available
-from ...modeling_layers import GradientCheckpointingLayer
-from ...modeling_outputs import (
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
+from transformers.generation import GenerationMixin
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_flash_attention_utils import flash_attn_supports_top_left_mask, is_flash_attn_available
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import (
     MoeCausalLMOutputWithPast,
     MoeModelOutputWithPast,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from ...modeling_utils import PreTrainedModel
-from ...utils import auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
 from .configuration_qwen2_moe import Qwen2MoeConfig
 
 
 if is_flash_attn_available():
-    from ...modeling_flash_attention_utils import _flash_attention_forward
+    from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask
 
-    from ...integrations.flex_attention import make_flex_block_causal_mask
+    from transformers.integrations.flex_attention import make_flex_block_causal_mask
 
 logger = logging.get_logger(__name__)
 
@@ -234,17 +235,30 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 # Modified from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2Moe
 class Qwen2MoeMLP(nn.Module):
-    def __init__(self, config, intermediate_size=None):
+    def __init__(self, config, intermediate_size=None, flap_bias=False, is_approx=False, acc_tokens=0):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+
+        self.is_approx = is_approx
+        if  self.is_approx:
+            self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
+            self.acc_tokens = acc_tokens
+        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=flap_bias)
+            self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if self.is_approx:
+            assert x.dim() == 2, f"Novice is only applicable to MoNE layers"
+            if self.acc_tokens > 0:
+                self.approx_value *= self.acc_tokens / (self.acc_tokens + x.shape[0])
+                self.approx_value += torch.sum(x, dim=0) / (self.acc_tokens + x.shape[0])
+                self.acc_tokens += x.shape[0]
+            return self.approx_value.unsqueeze(0).expand(x.shape[0], -1)
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -578,19 +592,57 @@ QWEN2MOE_ATTENTION_CLASSES = {
 
 
 class Qwen2MoeSparseMoeBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
-        self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
+        n_routed_experts = config.num_experts
+        if isinstance(n_routed_experts, dict):
+            assert layer_idx in n_routed_experts, f"layer idx: {layer_idx} is not in n_routed_experts: {n_routed_experts}"
+            n_routed_experts = n_routed_experts[layer_idx]
+
+        self.num_experts = n_routed_experts
+        self.top_k = min(config.num_experts_per_tok, self.num_experts)
         self.norm_topk_prob = config.norm_topk_prob
 
         # gating
-        self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        self.gate = nn.Linear(config.hidden_size, self.num_experts, bias=False)
+        
+        flap_bias = False
+        if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+            assert layer_idx is not None and layer_idx in config.flap_intermediate_sizes
+            routed_intermediate_sizes = config.flap_intermediate_sizes[layer_idx]["routed"]
+            flap_bias = True
+        elif hasattr(config, "routed_intermediate_sizes") and config.routed_intermediate_sizes is not None:
+            assert layer_idx is not None and layer_idx in config.routed_intermediate_sizes, f"layer idx: {layer_idx} is not in config.routed_intermediate_sizes: {config.routed_intermediate_sizes}"
+            routed_intermediate_sizes = config.routed_intermediate_sizes[layer_idx]
+        else:
+            routed_intermediate_sizes = [config.moe_intermediate_size for _ in range(n_routed_experts)]
+        assert len(routed_intermediate_sizes) == n_routed_experts, f"layer: {layer_idx} {len(routed_intermediate_sizes)}, {n_routed_experts}"
+        
+        is_approx = [False for _ in range(n_routed_experts)]
+        approx_expert_init_tokens = [0 for _ in range(n_routed_experts)]
+        if hasattr(config, "approximate_experts") and config.approximate_experts is not None:
+            curr_approx_expert_init_token_list = deepcopy(config.approximate_expert_init_tokens[layer_idx])
+            for i in range(n_routed_experts):
+                if i in config.approximate_experts[layer_idx]:
+                    is_approx[i] = True
+                    approx_expert_init_tokens[i] = curr_approx_expert_init_token_list.pop(0)
+
         self.experts = nn.ModuleList(
-            [Qwen2MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
+            [Qwen2MoeMLP(config, intermediate_size=routed_intermediate_sizes[i], 
+                    flap_bias=flap_bias, is_approx=is_approx[i], acc_tokens=approx_expert_init_tokens[i]
+            ) for i in range(self.num_experts)]
         )
 
-        self.shared_expert = Qwen2MoeMLP(config, intermediate_size=config.shared_expert_intermediate_size)
+        if hasattr(config, "flap_intermediate_sizes") and config.flap_intermediate_sizes is not None:
+            assert layer_idx is not None and layer_idx in config.flap_intermediate_sizes
+            shared_intermediate_size = config.flap_intermediate_sizes[layer_idx]["shared"]
+        elif hasattr(config, "shared_intermediate_sizes") and config.shared_intermediate_sizes is not None:
+            assert layer_idx in config.shared_intermediate_sizes
+            shared_intermediate_size = config.shared_intermediate_sizes[layer_idx]
+        else:
+            shared_intermediate_size = config.shared_expert_intermediate_size
+
+        self.shared_expert = Qwen2MoeMLP(config, intermediate_size=shared_intermediate_size, flap_bias=flap_bias)
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -648,9 +700,9 @@ class Qwen2MoeDecoderLayer(GradientCheckpointingLayer):
         self.self_attn = QWEN2MOE_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
         if (layer_idx not in config.mlp_only_layers) and (
-            config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
+            (config.num_experts > 0 if isinstance(config.num_experts, int) else config.num_experts[layer_idx] > 0) and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen2MoeSparseMoeBlock(config)
+            self.mlp = Qwen2MoeSparseMoeBlock(config, layer_idx)
         else:
             self.mlp = Qwen2MoeMLP(config, intermediate_size=config.intermediate_size)
 

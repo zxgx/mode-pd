@@ -4,7 +4,7 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -k oed
-#PBS -o mone-prune-q3.log 
+#PBS -o angular-prune-q2.log 
 
 cd $PBS_O_WORKDIR; 
 echo "JOB ID: $PBS_JOBID, pwd: $PWD, pbs workdir: $PBS_O_WORKDIR"
@@ -16,19 +16,17 @@ module load singularity
 
 . scripts/expert_prune/data_config.sh
 
-export model_id="Qwen3-30B-A3B"
+export model_id="Qwen2-57B-A14B"
 singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/mone/bin/activate
 python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
-    --expert_prune --preserve_n_experts 96 --expert_ranking_scope layer \
-    --expert_prune_metric mone --mone_ranking_metric fusion \
-    --compressed_model_save_path exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-96
+    --layer_prune --layer_prune_metric angular --drop_n_layers 7 \
+    --compressed_model_save_path exp/angular/$model_id-angular-pruned-75
 EOF
 
 singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/mone/bin/activate
 python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
-    --expert_prune --preserve_n_experts 64 --expert_ranking_scope layer \
-    --expert_prune_metric mone --mone_ranking_metric fusion \
-    --compressed_model_save_path exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-64
+    --layer_prune --layer_prune_metric angular --drop_n_layers 14 \
+    --compressed_model_save_path exp/angular/$model_id-angular-pruned-50
 EOF
