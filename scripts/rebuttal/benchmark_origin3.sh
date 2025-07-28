@@ -4,7 +4,7 @@
 #PBS -l walltime=8:00:00
 #PBS -j oe
 #PBS -k oed
-#PBS -o benchmark-origin.log 
+#PBS -o benchmark-origin-s1020.log 
 
 cd $PBS_O_WORKDIR; 
 echo "JOB ID: $PBS_JOBID, pwd: $PWD, pbs workdir: $PBS_O_WORKDIR"
@@ -20,8 +20,8 @@ singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/dply/bin/activate
 
 python bench_one_batch.py --model-path Qwen/Qwen3-30B-A3B \
-    --batch 1 128 512 --input-len 512 --output-len 256 \
-    --impl transformers --disable-cuda-graph --random-seed 42 \
-    --result-filename benchmark-s42-origin.jsonl
+    --batch 1 32 128 512 --input-len 512 --output-len 128 256 512 \
+    --impl transformers --disable-cuda-graph --random-seed 1020 \
+    --result-filename benchmark-s1020-origin.jsonl
 EOF
 # --profile --profile-filename-prefix origin

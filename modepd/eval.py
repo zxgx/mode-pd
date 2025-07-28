@@ -261,10 +261,10 @@ def main():
     lm_obj = HFLM(hf_model, parallelize=args.model_parallel, **model_kwargs)
     lm_obj.model.cuda()
     lm_obj.model.config.use_cache = True
-    lm_obj.model.generation_config.use_cache = True
-    if "DeepSeek-V2" in hf_model:
-        lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
-    logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.generation_config.use_cache, lm_obj.model.config.use_cache)}")
+    # lm_obj.model.generation_config.use_cache = True
+    # if "DeepSeek-V2" in hf_model:
+    #     lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
+    logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.config.use_cache)}")
     
     if args.analyse:
         analyser = Analyser(lm_obj.model)

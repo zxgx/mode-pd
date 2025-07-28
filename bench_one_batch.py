@@ -55,6 +55,7 @@ from typing import Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
+from modepd.utils import register_custom_model
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed.parallel_state import destroy_distributed_environment
@@ -444,6 +445,8 @@ def latency_test(
 
     # Load the model
     model_runner, tokenizer = load_model(server_args, port_args, tp_rank)
+    start_memory = torch.cuda.max_memory_allocated()
+    print(f"model arch: {model_runner.model}, memory alloc: {start_memory/1024**3:.2f} GB")
 
     # Prepare inputs for warm up
     reqs = prepare_synthetic_inputs_for_latency_test(
@@ -487,6 +490,24 @@ def latency_test(
             bench_args.profile if tp_rank == 0 else None,
             bench_args.profile_filename_prefix,
         )
+        
+        curr_memory = torch.cuda.max_memory_allocated()
+        print(f"Finish benchmark (bs, il, ol), memory alloc: {curr_memory/1024**3:.2f} GB, diff： {(curr_memory - start_memory)/1024**3:.2f} GB")
+
+        if model_runner.model_config.hf_config.model_type == "qwen3_moe_compressed":
+            num_experts_per_tok = model_runner.model_config.hf_config.num_experts_per_tok
+            total_tokens = bs * (il + ol) * num_experts_per_tok
+            layers = model_runner.model.model.layers
+            hit_ratios = []
+            for layer in layers:
+                novice_hit_tokens = 0
+                for expert in layer.mlp.experts:
+                    if expert.is_approx:
+                        novice_hit_tokens += expert.processed_tokens
+                        # reset
+                        expert.processed_tokens = 0
+                hit_ratios.append(novice_hit_tokens / total_tokens)
+            ret["novice_hit_ratios"] = sum(hit_ratios) / len(hit_ratios)
         if ret is not None:
             result_list.append(ret)
 
@@ -503,6 +524,10 @@ def latency_test(
 def main(server_args, bench_args):
     server_args.cuda_graph_max_bs = max(bench_args.batch_size)
 
+    if "Qwen3-30B-A3B" in server_args.model_path and server_args.model_path != "Qwen/Qwen3-30B-A3B":
+        # For the pruned model, we need to register the custom model.
+        register_custom_model()
+        
     _set_envs_and_config(server_args)
 
     if server_args.model_path:

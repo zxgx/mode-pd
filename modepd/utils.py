@@ -28,8 +28,8 @@ GB = 1024**3
 
 def register_custom_model():
     AutoConfig.register("deepseek_v2_compressed", DeepseekV2Config)
-    AutoModel.register(DeepseekV2Config, DeepseekV2Model)
-    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM)
+    AutoModel.register(DeepseekV2Config, DeepseekV2Model, exist_ok=True)
+    AutoModelForCausalLM.register(DeepseekV2Config, DeepseekV2ForCausalLM, exist_ok=True)
 
     AutoConfig.register("deepseek_v3_compressed", DeepseekV3Config)
     AutoModel.register(DeepseekV3Config, DeepseekV3Model, exist_ok=True)
@@ -37,8 +37,8 @@ def register_custom_model():
     AutoTokenizer.register(DeepseekV3Config, TikTokenTokenizer, exist_ok=True)
 
     AutoConfig.register("olmoe_compressed", OlmoneConfig)
-    AutoModel.register(OlmoneConfig, OlmoneModel)
-    AutoModelForCausalLM.register(OlmoneConfig, OlmoneForCausalLM)
+    AutoModel.register(OlmoneConfig, OlmoneModel, exist_ok=True)
+    AutoModelForCausalLM.register(OlmoneConfig, OlmoneForCausalLM, exist_ok=True)
 
     AutoConfig.register("qwen2_moe_compressed", Qwen2MoeConfig)
     AutoModel.register(Qwen2MoeConfig, Qwen2MoeModel, exist_ok=True)

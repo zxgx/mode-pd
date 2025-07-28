@@ -43,7 +43,8 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
+from transformers.utils import auto_docstring, can_return_tuple, logging
+# from transformers.utils import LossKwargs
 from .configuration_qwen3_moe import Qwen3MoeConfig
 
 
@@ -204,6 +205,7 @@ class Qwen3MoeMLP(nn.Module):
         self.intermediate_size = intermediate_size if intermediate_size is not None else config.intermediate_size
         
         self.is_approx = is_approx
+        self.processed_tokens = 0
         if  self.is_approx:
             self.approx_value = torch.nn.Parameter(torch.zeros(self.hidden_size))
             self.acc_tokens = acc_tokens
@@ -214,6 +216,7 @@ class Qwen3MoeMLP(nn.Module):
             self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        self.processed_tokens += x.shape[0]
         if self.is_approx:
             assert x.dim() == 2, f"Novice is only applicable to MoNE layers"
             if self.acc_tokens > 0:
@@ -622,7 +625,7 @@ class Qwen3MoeModel(Qwen3MoePreTrainedModel):
         )
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+# class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
 def load_balancing_loss_func(
@@ -759,7 +762,7 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         output_router_logits: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[KwargsForCausalLM],
+        **kwargs #: Unpack[KwargsForCausalLM],
     ) -> MoeCausalLMOutputWithPast:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
