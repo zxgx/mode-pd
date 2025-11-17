@@ -10,6 +10,7 @@ def get_args():
     # model config
     parser.add_argument("--log_dir", type=str, required=True)
     parser.add_argument("--speedup", action="store_true")
+    parser.add_argument("--math", action="store_true")
 
     return parser.parse_args()
 
@@ -112,11 +113,52 @@ def performace(args):
     df.to_csv(os.path.join(args.log_dir, f"summary-{args.log_dir.replace('/', '_')}.csv"))
 
 
+def math_perf(args):
+    data_dict = {
+        "gsm8k": {},
+        # "hendrycks_math": {},
+        "minerva_math": {},
+    }
+    task_keys = [
+        "gsm8k", "minerva_math"
+    ]
+    model_set = set()
+
+    directory = Path(args.log_dir)
+    for entry in directory.iterdir():
+        if entry.is_dir() or not entry.name.endswith(".json"):
+            continue
+        base = entry.name.split('-')
+        model_id = '-'.join(base[:-1])
+        model_set.add(model_id)
+
+    model_list = sorted(model_set)
+    for task in task_keys:
+        for model_id in model_list:
+            log_path = os.path.join(args.log_dir, f"{model_id}-{task}.json")
+            print(f"loading: {log_path}")
+            with open(log_path) as f:
+                src = json.load(f)
+
+            if task == "gsm8k":
+                data_dict[task][model_id] = src['results'][task]['exact_match,flexible-extract']
+            elif task == "hendrycks_math":
+                data_dict[task][model_id] = src['results'][task]['exact_match,none']
+            elif task == "minerva_math":
+                data_dict[task][model_id] = src['results'][task]['exact_match,none']
+    
+    df = pd.DataFrame(data_dict) * 100
+    # df['average'] = df.mean(axis=1)
+    df.to_csv(os.path.join(args.log_dir, f"summary-{args.log_dir.replace('/', '_')}.csv"))
+
+
 def main():
     args = get_args()
 
     if args.speedup:
         speedup(args)
+    elif args.math:
+        math_perf(args)
     else:
         performace(args)
 

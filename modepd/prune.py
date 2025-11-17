@@ -46,6 +46,11 @@ def parse_args():
     parser.add_argument("--enable_novice_evolving", action='store_true')
     parser.add_argument("--fusion_io_weight", type=float, default=0.5)
     parser.add_argument("--zero_out_novice", action='store_true')
+
+    # ablation
+    parser.add_argument("--l1_norm", action='store_true', help="Use L1 norm for expert pruning")
+    parser.add_argument("--coeff_var", action='store_true', help="Use coefficient variance for expert pruning")
+    parser.add_argument("--dump_stats_path", type=str, default=None, help="Path to dump the statistics for expert pruning")
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)
@@ -70,7 +75,7 @@ def main():
     if not (args.weight_prune and args.weight_prune_metric == 'norm'):
         train_dataset = build_dataset(
             args.dataset_name_or_path, args.dataset_config_name, args.streaming_dataset, tokenizer, 'train', 
-            args.data_type, args.block_size)
+            args.data_type, args.block_size, args.max_steps)
         data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
         train_dataloader = DataLoader(
             train_dataset,
@@ -103,6 +108,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # from transformers import AutoModelForCausalLM, AutoTokenizer
+    # model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-V2-Lite-Chat", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="flash_attention_2")
+    # tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V2-Lite-Chat")
+
     # model.cuda()
     # text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
     # inputs = tokenizer(text, return_tensors="pt")

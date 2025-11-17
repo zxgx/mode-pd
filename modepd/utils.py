@@ -6,6 +6,7 @@ import math
 import torch
 from datasets import (
     load_dataset, 
+    concatenate_datasets
     # interleave_datasets,
 )
 from transformers import AutoConfig, GenerationConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM
@@ -88,7 +89,7 @@ def get_memory_stats():
 
 def build_dataset(
     dataset_name_or_path, dataset_config_name, streaming, tokenizer, split, 
-    data_type=None, block_size=4*1024, logger=None, accelerator=None, seed=None
+    data_type=None, block_size=4*1024, max_steps=None, logger=None, accelerator=None, seed=None
 ):
     main_process_context = accelerator.main_process_first if accelerator is not None else nullcontext
 
@@ -99,6 +100,12 @@ def build_dataset(
     else:
         if "OLMoE-mix-0924" in dataset_name_or_path:
             raw_dataset = load_olmoe_mix_dataset(os.path.join(dataset_name_or_path, "data"), streaming=streaming, seed=seed)[split]
+        elif dataset_name_or_path == "EleutherAI/hendrycks_math":
+            config_list = ['algebra', 'counting_and_probability', 'geometry', 'intermediate_algebra', 'number_theory', 'prealgebra', 'precalculus']
+            ds_list = [load_dataset(dataset_name_or_path, config, split=split, streaming=False) for config in config_list]
+            selected_samples = int(math.ceil(max_steps/len(config_list)))
+            ds_list = [ds.select(range(selected_samples)) for ds in ds_list]
+            raw_dataset = concatenate_datasets(ds_list)
         else:
             raw_dataset = load_dataset(dataset_name_or_path, dataset_config_name, split=split, streaming=streaming)
     
@@ -119,25 +126,50 @@ def build_dataset(
     #################
     # Preprocessing the datasets.
     # 1. Only load text fields for the dataloader
-    column_names = raw_dataset.column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
+    if dataset_name_or_path == "EleutherAI/hendrycks_math":
+        assert 'problem' in raw_dataset.column_names
+        assert 'solution' in raw_dataset.column_names
 
-    def tokenize_function(examples):
-        if split == 'validation':
-            result = tokenizer(
-                [each for each in examples[text_column_name] if len(each) > 0], 
-                max_length=block_size, padding="max_length", truncation=True,
-            )
+        def tokenize_function(examples):
+            new_samples = []
+            for problem, solution in zip(examples['problem'], examples['solution']):
+                text = "Problem:" + "\n" + problem + "\n\n" + "Solution:" + "\n" + solution
+                new_samples.append(text)
+            result = tokenizer(new_samples, max_length=block_size, padding="max_length", truncation=True)
             result["labels"] = result["input_ids"].copy()
             return result
-        else:
-            return tokenizer(examples[text_column_name])
+    elif 'gsm8k' in dataset_name_or_path:
+        assert 'question' in raw_dataset.column_names
+        assert 'answer' in raw_dataset.column_names
+
+        def tokenize_function(examples):
+            new_samples = []
+            for question, answer in zip(examples['question'], examples['answer']):
+                text = "Question: " + question + "\n" + "Answer: " + answer
+                new_samples.append(text)
+            result = tokenizer(new_samples, max_length=block_size, padding="max_length", truncation=True)
+            result["labels"] = result["input_ids"].copy()
+            return result
+    else:
+        column_names = raw_dataset.column_names
+        text_column_name = "text" if "text" in column_names else column_names[0]
+
+        def tokenize_function(examples):
+            if split == 'validation':
+                result = tokenizer(
+                    [each for each in examples[text_column_name] if len(each) > 0], 
+                    max_length=block_size, padding="max_length", truncation=True,
+                )
+                result["labels"] = result["input_ids"].copy()
+                return result
+            else:
+                return tokenizer(examples[text_column_name])
 
     with main_process_context():
         tokenized_dataset = raw_dataset.map(
             tokenize_function,
             batched=True,
-            remove_columns=column_names,
+            remove_columns=raw_dataset.column_names,
         )
 
     # 2. Padding to max length    

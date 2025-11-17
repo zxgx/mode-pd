@@ -477,6 +477,8 @@ def expert_prune_by_mone(args, model, train_dataloader):
 
             # retrieve stats
             num_tokens = bias_stats[expert_name]["num_tokens"]
+            if num_tokens + token_size <= 1:
+                return
             baseline_out = bias_stats[expert_name]["baseline_out"]
             if args.mone_ranking_metric in ['output_fluctuation', 'io_fluctuation', 'fusion']:
                 fluc_out = bias_stats[expert_name]["fluc_out"]
@@ -610,9 +612,17 @@ def expert_prune_by_mone(args, model, train_dataloader):
             metric_list[layer_idx] = torch.norm(output_fluc, dim=1)
     elif args.mone_ranking_metric == 'fusion':
         for layer_idx in valid_moe_layer_indices:
-            fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
+            if args.coeff_var:
+                fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
+                base_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['baseline_out'] for e_idx in range(num_experts)]
+                fluc_list = [fluc/(base + 1e-6) for fluc, base in zip(fluc_list, base_list)]
+            else:
+                fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
             # num_experts
-            output_fluc = torch.norm(torch.sqrt(torch.stack(fluc_list)), dim=1)
+            if args.l1_norm:
+                output_fluc = torch.norm(torch.sqrt(torch.stack(fluc_list)), dim=1, p=1)
+            else:
+                output_fluc = torch.norm(torch.sqrt(torch.stack(fluc_list)), dim=1)
             metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) * ((1-args.fusion_io_weight) * routing_stats[layer_idx]["scores"])
     elif args.mone_ranking_metric=='token_fluctuation':
         for layer_idx in valid_moe_layer_indices:
@@ -630,6 +640,13 @@ def expert_prune_by_mone(args, model, train_dataloader):
             metric_list[layer_idx] = torch.norm(torch.stack(scores), dim=1)
     else:
         raise ValueError(f"unknow ranking metric: {args.mone_ranking_metric}")
+
+    if args.dump_stats_path is not None:
+        assert args.mone_ranking_metric == 'fusion'
+        data = {}
+        for layer_idx in valid_moe_layer_indices:
+            data[layer_idx] = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_out'] for e_idx in range(num_experts)]
+        torch.save(data, args.dump_stats_path)
 
     ###########################
     # Collect pruning threshold
