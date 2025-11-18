@@ -17,28 +17,11 @@ module load singularity
 
 . scripts/expert_prune/eval_config.sh
 
-# export model_id="Qwen3-30B-A3B"
-# singularity exec --nv $image bash << EOF
-# source $HPCTMP/venvs/mone/bin/activate
-# torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-#     --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-96 \
-#     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
-#     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
-# EOF
-
-# singularity exec --nv $image bash << EOF
-# source $HPCTMP/venvs/mone/bin/activate
-# torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-#     --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-64 \
-#     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
-#     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
-# EOF
-
-export model_id="Qwen2-57B-A14B"
+export model_id="Qwen3-30B-A3B"
 singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/mone/bin/activate
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-48 \
+    --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-96 \
     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
 EOF
@@ -46,7 +29,24 @@ EOF
 singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/mone/bin/activate
 torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
-    --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-32 \
+    --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-64 \
     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
 EOF
+
+# export model_id="Qwen2-57B-A14B"
+# singularity exec --nv $image bash << EOF
+# source $HPCTMP/venvs/mone/bin/activate
+# torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
+#     --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-48 \
+#     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
+#     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
+# EOF
+
+# singularity exec --nv $image bash << EOF
+# source $HPCTMP/venvs/mone/bin/activate
+# torchrun --standalone --nproc_per_node $GPUS_PER_NODE modepd/eval.py \
+#     --hf_model exp/mone_rs_out_fusion_layer/$model_id-mone-pruned-32 \
+#     --tasks $EVAL_TASKS --num_fewshots $EVAL_FEWSHOTS \
+#     --batch_size 8 --trust_remote_code --output_dir exp/mone_rs_out_fusion_layer
+# EOF

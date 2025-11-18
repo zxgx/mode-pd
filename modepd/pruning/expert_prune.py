@@ -623,7 +623,18 @@ def expert_prune_by_mone(args, model, train_dataloader):
                 output_fluc = torch.norm(torch.sqrt(torch.stack(fluc_list)), dim=1, p=1)
             else:
                 output_fluc = torch.norm(torch.sqrt(torch.stack(fluc_list)), dim=1)
-            metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) * ((1-args.fusion_io_weight) * routing_stats[layer_idx]["scores"])
+            
+            if args.fusion_io_weight is not None:
+                metric_list[layer_idx] = (args.fusion_io_weight * output_fluc) + ((1-args.fusion_io_weight) * routing_stats[layer_idx]["scores"])
+            elif args.normalized_scores:
+                def normalize(tensor):
+                    return (tensor - torch.min(tensor)) / (torch.max(tensor) - torch.min(tensor) + 1e-6)
+                metric_list[layer_idx] = normalize(output_fluc) * normalize(routing_stats[layer_idx]["scores"])
+            elif args.logsum_scores:
+                metric_list[layer_idx] = torch.log(output_fluc) + torch.log(routing_stats[layer_idx]["scores"])
+            else:
+                metric_list[layer_idx] = output_fluc * routing_stats[layer_idx]["scores"]
+
     elif args.mone_ranking_metric=='token_fluctuation':
         for layer_idx in valid_moe_layer_indices:
             fluc_list = [bias_stats[f'layers.{layer_idx}.experts.{e_idx}']['fluc_inp'] for e_idx in range(num_experts)]
