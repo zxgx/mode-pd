@@ -51,6 +51,8 @@ def parse_args():
     parser.add_argument("--l1_norm", action='store_true', help="Use L1 norm for expert pruning")
     parser.add_argument("--coeff_var", action='store_true', help="Use coefficient variance for expert pruning")
     parser.add_argument("--dump_stats_path", type=str, default=None, help="Path to dump the statistics for expert pruning")
+    parser.add_argument("--normalized_scores", action="store_true")
+    parser.add_argument("--logsum_scores", action="store_true")
     
     # expert weight pruning related arguments
     parser.add_argument("--weight_prune", action="store_true",)

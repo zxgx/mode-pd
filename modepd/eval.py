@@ -76,6 +76,7 @@ def get_args():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--stats_output_dir", type=str, default=None)
     parser.add_argument("--analyse", action='store_true')
+    parser.add_argument("--routing_distribution", action='store_true')
 
     return parser.parse_args()
 
@@ -222,6 +223,74 @@ class Analyser:
             )
 
 
+class RoutingAnalyser:
+    def __init__(self, model):
+        self.device = torch.cuda.current_device()
+
+        self.model = model
+        self.hidden_size = model.config.hidden_size
+        self.num_layers = model.config.num_hidden_layers
+
+        # Identify MoE layer
+        if "deepseek" in model.config.model_type:
+            self.valid_moe_layer_indices = [
+                layer_idx for layer_idx in range(self.num_layers) 
+                if (
+                    model.config.n_routed_experts is not None and
+                    layer_idx >= model.config.first_k_dense_replace and 
+                    layer_idx % model.config.moe_layer_freq == 0
+                )
+            ]
+        else:
+            self.valid_moe_layer_indices = list(range(self.num_layers))
+        
+        self.handles = []
+        self.build_hooks()
+
+    def build_hooks(self):
+        def create_expert_hook(expert_name):
+            def stateful_expert_hook(module, _input, _output):
+                out = _output
+                out = out.view(-1, out.shape[-1])
+                token_size = out.shape[0]
+                self.token_counts[expert_name] += token_size
+            
+            return stateful_expert_hook
+
+        self.token_counts = {}
+        for i in self.valid_moe_layer_indices:
+            mlp = self.model.model.layers[i].mlp
+            for e_idx in range(len(mlp.experts)):
+                expert_name = f"layers.{i}.experts.{e_idx}"
+                self.token_counts[expert_name] = 0
+                handle = mlp.experts[e_idx].register_forward_hook(create_expert_hook(expert_name))
+                self.handles.append(handle)
+        
+    def reset_stats(self):
+        for i in self.valid_moe_layer_indices:
+            mlp = self.model.model.layers[i].mlp
+            for e_idx in range(len(mlp.experts)):
+                expert_name = f"layers.{i}.experts.{e_idx}"
+                self.token_counts[expert_name] = 0
+
+    def dump_stats(self, model_id, task, save_dir=None):
+        results = []
+        for i in self.valid_moe_layer_indices:
+            mlp = self.model.model.layers[i].mlp
+            layer_counts = []
+            for e_idx in range(len(mlp.experts)):
+                expert_name = f"layers.{i}.experts.{e_idx}"
+                layer_counts.append(self.token_counts[expert_name])
+            results.append(layer_counts)
+        results = torch.tensor(results, dtype=torch.long)
+        logging.info(f"{model_id} token counts for task {task}: {results}")
+        if save_dir:
+            torch.save(
+                results, 
+                os.path.join(save_dir, f"token_counts-{model_id.replace('/', '_')}-{task}.pt")
+            )
+
+
 def main():
     args = get_args()
     logging.info(f"{pformat(vars(args), indent=2, width=120)}")
@@ -265,9 +334,11 @@ def main():
     # if "DeepSeek-V2" in hf_model:
     #     lm_obj.model.generation_config.pad_token_id = lm_obj.model.generation_config.eos_token_id
     logging.info(f"rank: {lm_obj.rank} / {lm_obj.world_size} model device: {lm_obj.model.device}, generation_config: {lm_obj.model.generation_config}, use_cache: {(lm_obj.model.config.use_cache)}")
-    
+
     if args.analyse:
         analyser = Analyser(lm_obj.model)
+    if args.routing_distribution:
+        routing_analyser = RoutingAnalyser(lm_obj.model)
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -288,6 +359,9 @@ def main():
         if args.analyse:
             analyser.dump_stats(hf_model, task, args.stats_output_dir)
             analyser.reset_stats()
+        if args.routing_distribution:
+            routing_analyser.dump_stats(hf_model, task, args.stats_output_dir)
+            routing_analyser.reset_stats()
 
 
 if __name__ == "__main__":

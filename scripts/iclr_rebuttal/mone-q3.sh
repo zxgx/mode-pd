@@ -33,22 +33,34 @@ module load singularity
 #     --compressed_model_save_path iclr_rebuttal/pruned_instruct_model/$model_id-mone-pruned-64
 # EOF
 
-export model_id="Qwen3-30B-A3B-Instruct-2507"
+# export model_id="Qwen3-30B-A3B-Instruct-2507"
 
-export data_config="--dataset_name_or_path openai/gsm8k --dataset_config_name main"
+# export data_config="--dataset_name_or_path openai/gsm8k --dataset_config_name main"
+# singularity exec --nv $image bash << EOF
+# source $HPCTMP/venvs/mone/bin/activate
+# python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
+#     --expert_prune --preserve_n_experts 96 --expert_ranking_scope layer \
+#     --expert_prune_metric mone --mone_ranking_metric fusion \
+#     --compressed_model_save_path iclr_rebuttal/gsm8k_pruned_instruct_model/$model_id-mone-pruned-96
+# EOF
+
+# export data_config="--dataset_name_or_path EleutherAI/hendrycks_math"
+# singularity exec --nv $image bash << EOF
+# source $HPCTMP/venvs/mone/bin/activate
+# python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
+#     --expert_prune --preserve_n_experts 96 --expert_ranking_scope layer \
+#     --expert_prune_metric mone --mone_ranking_metric fusion \
+#     --compressed_model_save_path iclr_rebuttal/math_pruned_instruct_model/$model_id-mone-pruned-96
+# EOF
+
+. scripts/expert_prune/data_config.sh
+
+export model_id="Qwen3-30B-A3B"
+
 singularity exec --nv $image bash << EOF
 source $HPCTMP/venvs/mone/bin/activate
 python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
     --expert_prune --preserve_n_experts 96 --expert_ranking_scope layer \
     --expert_prune_metric mone --mone_ranking_metric fusion \
-    --compressed_model_save_path iclr_rebuttal/gsm8k_pruned_instruct_model/$model_id-mone-pruned-96
-EOF
-
-export data_config="--dataset_name_or_path EleutherAI/hendrycks_math"
-singularity exec --nv $image bash << EOF
-source $HPCTMP/venvs/mone/bin/activate
-python modepd/prune.py --model_name_or_path Qwen/$model_id $data_config \
-    --expert_prune --preserve_n_experts 96 --expert_ranking_scope layer \
-    --expert_prune_metric mone --mone_ranking_metric fusion \
-    --compressed_model_save_path iclr_rebuttal/math_pruned_instruct_model/$model_id-mone-pruned-96
+    --compressed_model_save_path iclr_rebuttal/mone/$model_id-mone-pruned-96
 EOF
