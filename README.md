@@ -2,12 +2,15 @@
 1. Define environment variables: add following lines to `.bashrc` and then run `source ~/.bashrc`
     ```bash
     export SCRATCH=/scratch/users/nus/yourid
+    export HF_HOME=/scratch/users/nus/e0322940/hf_cache
+    export TRANSFORMERS_CACHE=/scratch/users/nus/e0322940/hf_cache
     ```
 
 2. Run follwoing command and upload sif file to `$SCRATCH/images`
     ```bash
     mkdir $SCRATCH/images
     mkdir $SCRATCH/venvs
+    mkdir $SCRATCH/hf_cache
     ```
 3. Setup virtual environment
     ```bash
